@@ -91,7 +91,11 @@ def main():
     # 从 Stage 1 加载权重（学生网络初始化）
     logger.info(f"Loading Stage 1 weights from {stage1_ckpt}")
     s1_ckpt = torch.load(stage1_ckpt, map_location=device, weights_only=True)
-    trainer.model.load_state_dict(s1_ckpt["model"])
+    # torch.compile 保存的权重带 _orig_mod. 前缀，加载前剥掉
+    raw_sd = s1_ckpt["model"]
+    if any(k.startswith("_orig_mod.") for k in raw_sd):
+        raw_sd = {k.replace("_orig_mod.", "", 1): v for k, v in raw_sd.items()}
+    trainer.model.load_state_dict(raw_sd)
 
     # Oracle：加载相同架构但接收全信息序列（含对手手牌）的模型
     # 数据里有 opponent_hands，使用真正的 Oracle 蒸馏而非自蒸馏
@@ -107,7 +111,7 @@ def main():
         )
     )
     # Oracle 加载相同的 Stage 1 权重（共享 encoder，只是输入序列更长）
-    trainer.oracle_model.load_state_dict(s1_ckpt["model"], strict=False)
+    trainer.oracle_model.load_state_dict(raw_sd, strict=False)
 
     ckpt_dir  = Path(trainer_cfg.save_dir)
     ckpt_dir.mkdir(parents=True, exist_ok=True)
