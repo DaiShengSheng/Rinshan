@@ -100,11 +100,11 @@ pip install -e .
 
 ## Roadmap
 
-- [×] Stage 1: Behavioral Cloning (nano + base configs)
-- [×] Stage 2: Oracle Distillation — framework complete; full-information data dependent
-- [×] Stage 3: Offline IQL — framework complete; base-scale convergence in progress
-- [×] Pure Python Mahjong Engine (full Tenhou rules, seeded RNG)
-- [×] Stage 4: Online Self-Play + League training — framework complete; base-scale convergence pending
+- [ ] Stage 1: Behavioral Cloning (nano + base configs)
+- [ ] Stage 2: Oracle Distillation — framework complete; full-information data dependent
+- [ ] Stage 3: Offline IQL — framework complete; base-scale convergence in progress
+- [ ] Pure Python Mahjong Engine & Rust Mahjong Engine(full Tenhou rules, seeded RNG)
+- [ ] Stage 4: Online Self-Play + League training — framework complete; base-scale convergence pending
 - [ ] Inference server / live game interface
 - [ ] Evaluation tooling and benchmark comparisons
 
