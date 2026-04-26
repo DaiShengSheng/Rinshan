@@ -95,7 +95,7 @@ def main():
     raw_sd = s1_ckpt["model"]
     if any(k.startswith("_orig_mod.") for k in raw_sd):
         raw_sd = {k.replace("_orig_mod.", "", 1): v for k, v in raw_sd.items()}
-    trainer.model.load_state_dict(raw_sd)
+    trainer.model.load_state_dict(raw_sd, strict=False)  # aux_heads 在 stage2 不用，忽略多余 key
 
     # Oracle：加载相同架构但接收全信息序列（含对手手牌）的模型
     # 数据里有 opponent_hands，使用真正的 Oracle 蒸馏而非自蒸馏
