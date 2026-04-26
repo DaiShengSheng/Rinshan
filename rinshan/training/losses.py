@@ -95,11 +95,22 @@ def distill_loss(
     """
     losses = {}
 
-    # Oracle 软标签
-    oracle_probs = F.softmax(oracle_q.detach() / temperature, dim=-1)
+    # Oracle 软标签：把 -inf 的非法动作替换成极大负数再 softmax，
+    # 避免 softmax 输出精确 0 导致 kl_div 出现 0*log(0)=nan
+    oracle_q_safe = oracle_q.detach().float()
+    oracle_q_safe = oracle_q_safe.masked_fill(
+        oracle_q_safe == float('-inf'), -1e9
+    )
+    oracle_probs = F.softmax(oracle_q_safe / temperature, dim=-1)   # (B, N) 无零值
+
+    # 学生同样做安全替换，避免 log(0)
+    student_q_safe = student_q.float()
+    student_q_safe = student_q_safe.masked_fill(
+        student_q_safe == float('-inf'), -1e9
+    )
+    student_log_probs = F.log_softmax(student_q_safe / temperature, dim=-1)
 
     # KL 散度：学生分布 → Oracle 分布
-    student_log_probs = F.log_softmax(student_q / temperature, dim=-1)
     kl_loss = F.kl_div(student_log_probs, oracle_probs, reduction='batchmean')
     losses["kl"] = kl_loss.item()
 
