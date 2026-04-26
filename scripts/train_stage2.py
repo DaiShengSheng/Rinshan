@@ -58,9 +58,9 @@ def main():
     val_files   = all_files[:val_n]
 
     train_ds = MjaiDataset(train_files, shuffle_files=True,
-                           shuffle_buffer=cfg.get("shuffle_buffer", 2000), stage=1)
+                           shuffle_buffer=cfg.get("shuffle_buffer", 2000), stage=2)
     val_ds   = MjaiDataset(val_files, shuffle_files=False,
-                           shuffle_buffer=500, stage=1)
+                           shuffle_buffer=500, stage=2)
 
     batch_size = cfg.get("batch_size", 64)
     train_loader = DataLoader(train_ds, batch_size=batch_size,
@@ -93,17 +93,21 @@ def main():
     s1_ckpt = torch.load(stage1_ckpt, map_location=device, weights_only=True)
     trainer.model.load_state_dict(s1_ckpt["model"])
 
-    # Oracle：加载相同架构的 Stage 1 模型（本身）
-    # 天凤公开数据无 opponent_hands，Oracle=Student 自蒸馏
-    logger.info("Oracle = Stage 1 model (self-distillation, no full-info data)")
+    # Oracle：加载相同架构但接收全信息序列（含对手手牌）的模型
+    # 数据里有 opponent_hands，使用真正的 Oracle 蒸馏而非自蒸馏
+    logger.info("Oracle = full-information model (true oracle distillation)")
+    from rinshan.constants import MAX_ORACLE_SEQ_LEN
+    oracle_transformer_cfg = TransformerConfig.from_preset(cfg.get("model_preset", "base"))
+    oracle_transformer_cfg.max_seq_len = MAX_ORACLE_SEQ_LEN   # Oracle 序列更长，含对手手牌
     trainer.set_oracle_model(
         RinshanModel(
-            transformer_cfg=TransformerConfig.from_preset(cfg.get("model_preset","base")),
-            use_belief=True, use_aux=False
+            transformer_cfg=oracle_transformer_cfg,
+            use_belief=False,  # Oracle 已看全牌，不需要 Belief Net
+            use_aux=False,
         )
     )
-    # Oracle 加载相同的 Stage 1 权重
-    trainer.oracle_model.load_state_dict(s1_ckpt["model"])
+    # Oracle 加载相同的 Stage 1 权重（共享 encoder，只是输入序列更长）
+    trainer.oracle_model.load_state_dict(s1_ckpt["model"], strict=False)
 
     ckpt_dir  = Path(trainer_cfg.save_dir)
     ckpt_dir.mkdir(parents=True, exist_ok=True)
@@ -118,10 +122,8 @@ def main():
         if step >= total_steps:
             break
 
-        # Stage 2 需要 oracle_tokens（这里直接用 tokens 本身）
-        batch["oracle_tokens"]    = batch["tokens"]
-        batch["oracle_pad_mask"]  = batch.get("pad_mask")
-
+        # oracle_tokens 由 Dataset(stage=2) 通过 encode_oracle() 生成，直接使用
+        # （不再用 tokens 覆盖，否则退化成自蒸馏）
         loss_dict = trainer.train_step(batch)
         step = trainer.step
 
@@ -132,8 +134,7 @@ def main():
             n_val = 0
             with torch.no_grad():
                 for vb in val_loader:
-                    vb["oracle_tokens"]   = vb["tokens"]
-                    vb["oracle_pad_mask"] = vb.get("pad_mask")
+                    # oracle_tokens 已由 Dataset(stage=2) 填充，直接使用
                     _, ld = trainer._forward_and_loss(vb)
                     val_loss += ld["total"]
                     n_val += 1
