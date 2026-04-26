@@ -1,0 +1,30 @@
+﻿# Stage 2: Oracle 蒸馏 (Large 规模)
+
+stage: 2
+model_preset: large
+stage1_ckpt: checkpoints/stage1_large/best.pt
+
+data_dir: data/annotated_grp
+val_ratio: 0.02
+shuffle_buffer: 5000
+
+lr: 5e-5
+weight_decay: 0.01
+warmup_steps: 1000
+total_steps: 80_000
+batch_size: 128
+grad_accum_steps: 4       # 等效 batch=512
+max_grad_norm: 1.0
+
+dtype: bfloat16
+amp: true
+compile: true
+
+save_dir: checkpoints/stage2_large
+save_every: 5000
+log_every: 100
+val_every: 2000
+
+device: cuda
+num_workers: 16
+pin_memory: true

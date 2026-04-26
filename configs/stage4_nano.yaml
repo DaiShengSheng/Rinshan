@@ -1,0 +1,45 @@
+# Stage 4: 在线自对弈 + League (Nano 规模，快速验证用)
+
+stage: 4
+model_preset: nano
+
+stage3_ckpt: checkpoints/stage3_nano/best.pt
+
+self_play:
+  n_games_per_iter: 16
+  n_agents: 1
+  game_length: tonpuu       # nano 用东风战，更快
+  temperature: 0.8
+  top_p: 0.9
+  greedy: false
+  output_dir: data/self_play_nano
+
+league:
+  max_size: 4
+  latest_weight: 0.5
+  snapshot_every: 10
+  save_dir: checkpoints/stage4_nano_league/
+
+buffer:
+  capacity: 50000
+
+n_iters: 100
+train_steps_per_iter: 200
+batch_size: 64
+grad_accum_steps: 1
+lr: 1e-5
+weight_decay: 0.01
+warmup_steps: 50
+total_steps: 20000
+max_grad_norm: 1.0
+target_update_every: 200
+
+dtype: float32
+amp: false
+
+save_dir: checkpoints/stage4_nano
+save_every: 10
+log_every: 50
+
+device: cuda
+num_workers: 2

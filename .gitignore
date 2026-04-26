@@ -1,0 +1,16 @@
+libriichi/target/
+dist/
+
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.venv/
+
+checkpoints/
+data/
+!libriichi/src/algo/data/
+*.log
+
+scripts/fetch_tenhou.py
+scripts/parse_tenhou.py

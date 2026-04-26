@@ -1,0 +1,34 @@
+# Stage 1: 行为克隆 (Large 规模)
+
+stage: 1
+model_preset: large
+
+# 数据
+data_dir: data/annotated_grp
+val_ratio: 0.02
+shuffle_buffer: 20000
+
+# 训练
+lr: 1e-4
+weight_decay: 0.1
+warmup_steps: 4000
+total_steps: 500_000
+batch_size: 1280
+grad_accum_steps: 2       # eff_batch=2560, VRAM=81GB/102GB (79%)
+max_grad_norm: 1.0
+
+# 精度
+dtype: bfloat16
+amp: true
+compile: true
+
+# 保存 & 日志
+save_dir: checkpoints/stage1_large
+save_every: 5000
+log_every: 100
+val_every: 5000
+
+# 设备
+device: cuda
+num_workers: 16
+pin_memory: true

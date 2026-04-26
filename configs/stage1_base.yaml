@@ -1,0 +1,32 @@
+stage: 1
+model_preset: base
+
+# 数据
+data_dir: data/annotated_grp
+val_ratio: 0.02
+shuffle_buffer: 20000
+
+# 训练
+lr: 1e-4
+weight_decay: 0.1
+warmup_steps: 2000
+total_steps: 200_000
+batch_size: 1024          # eff_batch=6144，显存 ~32GB
+grad_accum_steps: 6       # eff_batch=6144
+max_grad_norm: 1.0
+
+# 精度
+dtype: bfloat16
+amp: true
+compile: true
+
+# 保存 & 日志
+save_dir: checkpoints/stage1_base
+save_every: 5000
+log_every: 100
+val_every: 20000
+
+# 设备
+device: cuda
+num_workers: 16
+pin_memory: true

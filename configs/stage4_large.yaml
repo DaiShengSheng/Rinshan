@@ -1,0 +1,47 @@
+# Stage 4: 在线自对弈 + League (Large 规模)
+
+stage: 4
+model_preset: large
+
+stage3_ckpt: checkpoints/stage3_large/best.pt
+
+self_play:
+  n_games_per_iter: 64
+  n_agents: 1
+  game_length: hanchan
+  temperature: 0.8
+  top_p: 0.9
+  greedy: false
+  output_dir: data/self_play_large
+
+league:
+  max_size: 8
+  latest_weight: 0.5
+  snapshot_every: 10
+  save_dir: checkpoints/stage4_large_league/
+
+buffer:
+  capacity: 500000
+
+n_iters: 500
+train_steps_per_iter: 50
+batch_size: 64
+grad_accum_steps: 8       # 等效 batch=512
+lr: 5e-6
+weight_decay: 0.01
+warmup_steps: 200
+total_steps: 25000
+max_grad_norm: 1.0
+target_update_every: 100
+
+dtype: bfloat16
+amp: true
+compile: true
+
+save_dir: checkpoints/stage4_large
+save_every: 10
+log_every: 10
+
+device: cuda
+num_workers: 16
+pin_memory: true

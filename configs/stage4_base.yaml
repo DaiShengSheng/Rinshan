@@ -1,0 +1,47 @@
+# Stage 4: 在线自对弈 + League
+
+stage: 4
+model_preset: base
+
+# 自对弈
+self_play:
+  n_games_per_iter: 128
+  game_length: hanchan    # hanchan / tonpuu
+  device: cuda
+
+# League
+league:
+  max_size: 8
+  latest_weight: 0.5
+  snapshot_every: 10      # 每 10 轮存一次 snapshot
+  save_dir: checkpoints/stage4_league/
+
+# Replay buffer
+buffer:
+  capacity: 500000
+
+# 训练
+n_iters: 500
+train_steps_per_iter: 50
+lr: 1e-5
+weight_decay: 0.01
+warmup_steps: 100
+total_steps: 25000
+batch_size: 512
+grad_accum_steps: 2       # 等效 batch=1024
+max_grad_norm: 1.0
+target_update_every: 100
+
+# 精度
+dtype: bfloat16
+amp: true
+compile: true
+
+# 保存
+save_dir: checkpoints/stage4_base
+save_every: 1000
+log_every: 10
+
+device: cuda
+num_workers: 16
+pin_memory: true

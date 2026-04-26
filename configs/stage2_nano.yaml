@@ -1,0 +1,28 @@
+﻿# Stage 2: Oracle 蒸馏 (Nano 规模，快速验证用)
+
+stage: 2
+model_preset: nano
+stage1_ckpt: checkpoints/stage1_nano/best.pt
+
+data_dir: data/annotated_grp
+val_ratio: 0.05
+shuffle_buffer: 1000
+
+lr: 1e-4
+weight_decay: 0.01
+warmup_steps: 200
+total_steps: 20_000
+batch_size: 64
+grad_accum_steps: 1
+max_grad_norm: 1.0
+
+dtype: float32
+amp: false
+
+save_dir: checkpoints/stage2_nano
+save_every: 2000
+log_every: 50
+val_every: 500
+
+device: cuda
+num_workers: 2

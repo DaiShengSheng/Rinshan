@@ -1,0 +1,20 @@
+﻿# GRP 训练配置
+
+data_dir: data/annotated_grp
+val_ratio: 0.05
+
+lr: 1e-3
+weight_decay: 1e-4
+epochs: 30
+batch_size: 1024
+
+save_dir: checkpoints/grp
+platform: tenhou            # tenhou / jantama
+
+# train_grp.py DataLoader workers
+# GRPDataset 是全内存 tensor，不需要多进程加载，固定写 0
+dataloader_workers: 0
+
+# fill_grp_rewards.py ProcessPoolExecutor 并行进程数
+# 按机器 CPU 核数调整
+fill_workers: 8
