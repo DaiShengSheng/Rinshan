@@ -12,7 +12,7 @@ lr: 3e-5
 weight_decay: 0.01
 warmup_steps: 500
 total_steps: 150_000
-batch_size: 768           # compile=True 后 64GB@640，768 约 77GB，effective batch=1536
+batch_size: 1024          # compile=True 下 93GB/96GB，effective batch=2048
 grad_accum_steps: 2       # 等效 batch=1024
 max_grad_norm: 1.0
 
