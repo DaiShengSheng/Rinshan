@@ -14,7 +14,7 @@ warmup_steps: 500
 total_steps: 50_000
 batch_size: 512
 grad_accum_steps: 1
-max_grad_norm: 1.0
+max_grad_norm: 0.5
 
 dtype: bfloat16
 amp: true
@@ -22,7 +22,7 @@ amp: true
 save_dir: checkpoints/stage2_base
 save_every: 5000
 log_every: 100
-val_every: 2000
+val_every: 1000
 
 device: cuda
 num_workers: 16

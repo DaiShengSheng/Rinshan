@@ -116,8 +116,31 @@ def main():
     ckpt_dir  = Path(trainer_cfg.save_dir)
     ckpt_dir.mkdir(parents=True, exist_ok=True)
     total_steps = int(cfg.get("total_steps", 50_000))
-    val_every   = int(cfg.get("val_every", 2000))
+    val_every   = int(cfg.get("val_every", 1000))
     best_val_loss = float("inf")
+    patience = int(cfg.get("patience", 5))   # 连续 N 次 val 不改善则停止
+    patience_counter = 0
+
+    # ── Resume from checkpoint ────────────────
+    resume_ckpt = cfg.get("resume_ckpt", "")
+    if not resume_ckpt:
+        # 自动找最新 checkpoint
+        existing = sorted(ckpt_dir.glob("checkpoint_*.pt"))
+        if existing:
+            resume_ckpt = str(existing[-1])
+    if resume_ckpt and Path(resume_ckpt).exists():
+        logger.info(f"Resuming from {resume_ckpt}")
+        ckpt = torch.load(resume_ckpt, map_location=device, weights_only=True)
+        # 剥 _orig_mod. 前缀（如有）
+        sd = ckpt["model"]
+        if any(k.startswith("_orig_mod.") for k in sd):
+            sd = {k.replace("_orig_mod.", "", 1): v for k, v in sd.items()}
+        trainer.model.load_state_dict(sd, strict=False)
+        trainer.optimizer.load_state_dict(ckpt["optimizer"])
+        trainer.scheduler.load_state_dict(ckpt["scheduler"])
+        trainer.step = ckpt["step"]
+        best_val_loss = ckpt.get("best_val_loss", float("inf"))
+        logger.info(f"Resumed at step {trainer.step}, best_val_loss={best_val_loss:.4f}")
 
     logger.info(f"Starting Stage 2 (self-distillation) for {total_steps} steps")
 
@@ -126,19 +149,15 @@ def main():
         if step >= total_steps:
             break
 
-        # oracle_tokens 由 Dataset(stage=2) 通过 encode_oracle() 生成，直接使用
-        # （不再用 tokens 覆盖，否则退化成自蒸馏）
         loss_dict = trainer.train_step(batch)
         step = trainer.step
 
         if step % val_every == 0:
-            # 简单 val loss
             trainer.model.eval()
             val_loss = 0.0
             n_val = 0
             with torch.no_grad():
                 for vb in val_loader:
-                    # oracle_tokens 已由 Dataset(stage=2) 填充，直接使用
                     _, ld = trainer._forward_and_loss(vb)
                     val_loss += ld["total"]
                     n_val += 1
@@ -146,10 +165,29 @@ def main():
                         break
             trainer.model.train()
             val_loss /= max(n_val, 1)
-            logger.info(f"[val step={step}] val_loss={val_loss:.4f}")
+            logger.info(f"[val step={step}] val_loss={val_loss:.4f}  best={best_val_loss:.4f}  patience={patience_counter}/{patience}")
             if val_loss < best_val_loss:
                 best_val_loss = val_loss
-                trainer.save(ckpt_dir / "best.pt")
+                patience_counter = 0
+                # 将 best_val_loss 一并存进 checkpoint
+                torch.save(
+                    {
+                        "step": trainer.step,
+                        "stage": 2,
+                        "model": trainer.model.state_dict(),
+                        "optimizer": trainer.optimizer.state_dict(),
+                        "scheduler": trainer.scheduler.state_dict(),
+                        "scaler": trainer.scaler.state_dict(),
+                        "best_val_loss": best_val_loss,
+                    },
+                    ckpt_dir / "best.pt",
+                )
+                logger.info(f"New best saved (val_loss={best_val_loss:.4f})")
+            else:
+                patience_counter += 1
+                if patience_counter >= patience:
+                    logger.info(f"Early stopping at step {step} (no improvement for {patience} evals)")
+                    break
 
     logger.info("Stage 2 complete")
     trainer.save(ckpt_dir / "final.pt")

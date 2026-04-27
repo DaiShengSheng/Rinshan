@@ -112,6 +112,9 @@ def distill_loss(
 
     # KL 散度：学生分布 → Oracle 分布
     kl_loss = F.kl_div(student_log_probs, oracle_probs, reduction='batchmean')
+    # 限幅：KL 无上界，少量 bad batch 可以把单步 loss 炸到几十甚至几百，
+    # 导致权重被持续污染。10.0 约为正常收敛值的 20x，足以保留真实梯度信号。
+    kl_loss = kl_loss.clamp(max=10.0)
     losses["kl"] = kl_loss.item()
 
     # 行为克隆（硬标签，防止蒸馏偏离真实分布太远）
