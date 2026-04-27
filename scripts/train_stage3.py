@@ -61,7 +61,7 @@ def main():
     train_loader = DataLoader(train_ds, batch_size=batch_size,
                               collate_fn=collate_fn,
                               num_workers=cfg.get("num_workers", 2), pin_memory=True)
-    val_loader   = DataLoader(val_ds, batch_size=batch_size*2,
+    val_loader   = DataLoader(val_ds, batch_size=batch_size,   # 不扩大，Stage3 val 同样有3次forward
                               collate_fn=collate_fn,
                               num_workers=cfg.get("num_workers", 2), pin_memory=True)
 
@@ -71,9 +71,12 @@ def main():
         device           = cfg.get("device", "cuda"),
         dtype            = cfg.get("dtype", "float32"),
         amp              = cfg.get("amp", False),
+        compile          = cfg.get("compile", False),
         model_preset     = cfg.get("model_preset", "base"),
         lr               = float(cfg.get("lr", 1e-4)),
         weight_decay     = float(cfg.get("weight_decay", 0.01)),
+        max_grad_norm    = float(cfg.get("max_grad_norm", 1.0)),
+        grad_accum_steps = int(cfg.get("grad_accum_steps", 1)),   # ← 修复：之前漏传，永远是1
         warmup_steps     = int(cfg.get("warmup_steps", 500)),
         total_steps      = int(cfg.get("total_steps", 100_000)),
         save_dir         = cfg.get("save_dir", "checkpoints/stage3"),

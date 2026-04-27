@@ -287,11 +287,11 @@ class Trainer:
                 self.optimizer.zero_grad(set_to_none=True)
                 self.scheduler.step()
 
-        # 目标网络 EMA 软更新（Stage 3）
-        if self.cfg.stage == 3 and (self.step + 1) % self.cfg.target_update_every == 0:
-            self._update_target_network()
-
         self.step += 1
+
+        # 目标网络 EMA 软更新（Stage 3）
+        if self.cfg.stage == 3 and self.step % self.cfg.target_update_every == 0:
+            self._update_target_network()
 
         # 定期日志
         if self.step % self.cfg.log_every == 0:
