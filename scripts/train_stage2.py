@@ -124,10 +124,18 @@ def main():
     # ── Resume from checkpoint ────────────────
     resume_ckpt = cfg.get("resume_ckpt", "")
     if not resume_ckpt:
-        # 自动找最新 checkpoint
-        existing = sorted(ckpt_dir.glob("checkpoint_*.pt"))
-        if existing:
-            resume_ckpt = str(existing[-1])
+        # 优先用 best.pt，没有再找编号最大的 checkpoint
+        best_pt = ckpt_dir / "best.pt"
+        if best_pt.exists():
+            resume_ckpt = str(best_pt)
+        else:
+            # 按 step 数字排序，取最大编号（避免字符串排序 5000 > 40000 的问题）
+            existing = sorted(
+                ckpt_dir.glob("checkpoint_*.pt"),
+                key=lambda p: int(p.stem.split("_")[-1])
+            )
+            if existing:
+                resume_ckpt = str(existing[-1])
     if resume_ckpt and Path(resume_ckpt).exists():
         logger.info(f"Resuming from {resume_ckpt}")
         ckpt = torch.load(resume_ckpt, map_location=device, weights_only=True)
