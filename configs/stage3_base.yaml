@@ -12,8 +12,8 @@ lr: 3e-5
 weight_decay: 0.01
 warmup_steps: 500
 total_steps: 150_000
-batch_size: 512           # target_model double forward 已考虑
-grad_accum_steps: 2       # 等效 batch=1024
+batch_size: 1024          # 96GB VRAM 可直接装下，省去 grad_accum 的 2x overhead
+grad_accum_steps: 1       # 等效 batch 仍为 1024，但吞吐翻倍
 max_grad_norm: 1.0
 
 # IQL 超参
