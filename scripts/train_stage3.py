@@ -84,8 +84,16 @@ def main():
     trainer = Trainer(trainer_cfg)
     device  = trainer.device
 
-    # 从 Stage 1/2 加载权重
-    if stage1_ckpt and Path(stage1_ckpt).exists():
+    # ── 断点续训：优先恢复已有 checkpoint，否则从 Stage 1 初始化 ──
+    ckpt_dir = Path(trainer_cfg.save_dir)
+    existing_ckpts = sorted(
+        ckpt_dir.glob("checkpoint_*.pt"),
+        key=lambda p: int(p.stem.split("_")[-1]),
+    )
+    if existing_ckpts:
+        logger.info(f"Resuming from {existing_ckpts[-1]}")
+        trainer.load(existing_ckpts[-1])
+    elif stage1_ckpt and Path(stage1_ckpt).exists():
         logger.info(f"Loading Stage 1 weights from {stage1_ckpt}")
         s1_ckpt = torch.load(stage1_ckpt, map_location=device, weights_only=True)
         trainer.model.load_state_dict(s1_ckpt["model"], strict=False)
@@ -93,9 +101,8 @@ def main():
         trainer.target_model.load_state_dict(s1_ckpt["model"], strict=False)
         logger.info("Target network initialized with Stage 1 weights (strict=False)")
     else:
-        logger.warning("No stage1_ckpt provided, training from scratch")
+        logger.warning("No checkpoint or stage1_ckpt found, training from scratch")
 
-    ckpt_dir  = Path(trainer_cfg.save_dir)
     ckpt_dir.mkdir(parents=True, exist_ok=True)
     total_steps = int(cfg.get("total_steps", 100_000))
     val_every   = int(cfg.get("val_every", 2000))
