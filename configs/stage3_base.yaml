@@ -11,9 +11,9 @@ shuffle_buffer: 5000
 lr: 3e-5
 weight_decay: 0.01
 warmup_steps: 500
-total_steps: 300_000      # batch=512 accum=1 → effective 512/step，翻倍步数补回原 153.6M 数据量
+total_steps: 150_000
 batch_size: 512           # target_model double forward 已考虑
-grad_accum_steps: 1       # 去掉 accum，effective batch=512，吞吐 ~2x，显存不变
+grad_accum_steps: 2       # 等效 batch=1024
 max_grad_norm: 1.0
 
 # IQL 超参
@@ -24,9 +24,9 @@ amp: true
 compile: true
 
 save_dir: checkpoints/stage3_base
-save_every: 10000
-log_every: 200
-val_every: 4000
+save_every: 5000
+log_every: 100
+val_every: 2000
 
 device: cuda
 num_workers: 16
