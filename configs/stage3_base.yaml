@@ -8,11 +8,12 @@ data_dir: data/annotated_grp
 val_ratio: 0.02
 shuffle_buffer: 5000
 
-lr: 6e-5           # ↑ 2x，从 best.pt 续训时生效（reset_lr=true）
+lr: 1e-4            # ↑ batch=2048 下合理上限，cql_weight 已降所以稳
 weight_decay: 0.01
 warmup_steps: 100   # 已有基础，短暂热身即可
 total_steps: 150_000
-reset_lr: true      # 丢弃旧 scheduler，用新 lr 重建
+reset_lr: true       # 丢弃旧 scheduler，用新 lr 重建（每次重启默认行为）
+weights_only_save: true  # 只存模型权重，跳过 optimizer/scheduler，省时省空间
 batch_size: 1024          # compile=True 下 93GB/96GB，effective batch=2048
 grad_accum_steps: 2       # 等效 batch=1024
 max_grad_norm: 1.0
@@ -28,7 +29,7 @@ amp: true
 compile: true
 
 save_dir: checkpoints/stage3_base
-save_every: 5000
+save_every: 5000     # 只存权重时每个 ckpt 约 400MB（原来 ~1.2GB）
 log_every: 100
 val_every: 2000
 

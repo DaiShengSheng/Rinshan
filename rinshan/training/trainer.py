@@ -58,6 +58,7 @@ class TrainerConfig:
     # ── IQL 专用 ──────────────────────
     target_update_every: int = 100  # 每 N 步做一次目标网络 EMA 更新
     cql_weight: float = -1.0        # <0 表示使用 constants 默认值，>=0 则覆盖
+    weights_only_save: bool = False  # True = 只存 model/target 权重，跳过 optimizer/scheduler
 
 
 class Trainer:
@@ -319,19 +320,26 @@ class Trainer:
                 p_tgt.data.mul_(1 - tau).add_(tau * p_src.data)
 
     def save(self, path: Path):
-        torch.save(
-            {
-                "step": self.step,
-                "stage": self.cfg.stage,
-                "model": self.model.state_dict(),
+        if self.cfg.weights_only_save:
+            payload = {
+                "step":         self.step,
+                "stage":        self.cfg.stage,
+                "model":        self.model.state_dict(),
                 "target_model": self.target_model.state_dict()
                                 if self.target_model else None,
-                "optimizer": self.optimizer.state_dict(),
-                "scheduler": self.scheduler.state_dict(),
-                "scaler": self.scaler.state_dict(),
-            },
-            path,
-        )
+            }
+        else:
+            payload = {
+                "step":         self.step,
+                "stage":        self.cfg.stage,
+                "model":        self.model.state_dict(),
+                "target_model": self.target_model.state_dict()
+                                if self.target_model else None,
+                "optimizer":    self.optimizer.state_dict(),
+                "scheduler":    self.scheduler.state_dict(),
+                "scaler":       self.scaler.state_dict(),
+            }
+        torch.save(payload, path)
         logger.info(f"Saved checkpoint → {path}")
 
     def load(self, path: Path):

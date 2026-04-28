@@ -83,7 +83,8 @@ def main():
         save_every       = int(cfg.get("save_every", 5000)),
         log_every        = int(cfg.get("log_every", 100)),
         target_update_every = int(cfg.get("target_update_every", 100)),
-        cql_weight          = float(cfg.get("cql_weight", -1.0)),  # -1 = 用 constants 默认值
+        cql_weight          = float(cfg.get("cql_weight", -1.0)),
+        weights_only_save   = bool(cfg.get("weights_only_save", False)),
     )
     trainer = Trainer(trainer_cfg)
     device  = trainer.device
@@ -98,16 +99,20 @@ def main():
     if existing_ckpts and not reset_lr:
         logger.info(f"Resuming from {existing_ckpts[-1]}")
         trainer.load(existing_ckpts[-1])
-    elif (existing_ckpts or (ckpt_dir / "best.pt").exists()) and reset_lr:
-        # reset_lr 模式：只恢复权重，optimizer/scheduler 用新 lr 重建
-        src = existing_ckpts[-1] if existing_ckpts else ckpt_dir / "best.pt"
-        logger.info(f"reset_lr=True: loading weights only from {src}")
-        ckpt = torch.load(src, map_location=device, weights_only=True)
-        trainer.model.load_state_dict(ckpt["model"])
-        if trainer.target_model and ckpt.get("target_model"):
-            trainer.target_model.load_state_dict(ckpt["target_model"])
-        trainer.step = ckpt["step"]
-        logger.info(f"Weights loaded (step={trainer.step}), optimizer/scheduler reset to lr={trainer_cfg.lr:.2e}")
+    elif reset_lr:
+        # reset_lr 模式：优先用 best.pt（最佳权重），没有再用最新 checkpoint
+        best_path = ckpt_dir / "best.pt"
+        src = best_path if best_path.exists() else (existing_ckpts[-1] if existing_ckpts else None)
+        if src is None:
+            logger.warning("reset_lr=True but no checkpoint found, falling through to Stage1 init")
+        else:
+            logger.info(f"reset_lr=True: loading weights only from {src}")
+            ckpt = torch.load(src, map_location=device, weights_only=True)
+            trainer.model.load_state_dict(ckpt["model"])
+            if trainer.target_model and ckpt.get("target_model"):
+                trainer.target_model.load_state_dict(ckpt["target_model"])
+            trainer.step = ckpt["step"]
+            logger.info(f"Weights loaded (step={trainer.step}), optimizer/scheduler reset to lr={trainer_cfg.lr:.2e}")
     elif stage1_ckpt and Path(stage1_ckpt).exists():
         logger.info(f"Loading Stage 1 weights from {stage1_ckpt}")
         s1_ckpt = torch.load(stage1_ckpt, map_location=device, weights_only=True)
