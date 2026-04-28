@@ -8,13 +8,17 @@ data_dir: data/annotated_grp
 val_ratio: 0.02
 shuffle_buffer: 5000
 
-lr: 3e-5
+lr: 6e-5           # ↑ 2x，从 best.pt 续训时生效（reset_lr=true）
 weight_decay: 0.01
-warmup_steps: 500
+warmup_steps: 100   # 已有基础，短暂热身即可
 total_steps: 150_000
+reset_lr: true      # 丢弃旧 scheduler，用新 lr 重建
 batch_size: 1024          # compile=True 下 93GB/96GB，effective batch=2048
 grad_accum_steps: 2       # 等效 batch=1024
 max_grad_norm: 1.0
+
+# CQL 稳定性保护（spike 过一次，小幅降权重）
+cql_weight: 0.3     # 默认值，可在 constants 里覆盖
 
 # IQL 超参
 target_update_every: 100

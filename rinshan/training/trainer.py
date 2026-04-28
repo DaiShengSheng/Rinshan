@@ -57,6 +57,7 @@ class TrainerConfig:
 
     # ── IQL 专用 ──────────────────────
     target_update_every: int = 100  # 每 N 步做一次目标网络 EMA 更新
+    cql_weight: float = -1.0        # <0 表示使用 constants 默认值，>=0 则覆盖
 
 
 class Trainer:
@@ -249,6 +250,8 @@ class Trainer:
                 if cql_w is not None:
                     extra_kwargs["cql_weight"] = float(cql_w)
                     extra_kwargs["offline"] = False
+                elif self.cfg.cql_weight >= 0:
+                    extra_kwargs["cql_weight"] = self.cfg.cql_weight  # yaml 覆盖
 
                 return iql_loss(
                     q=out.q,
