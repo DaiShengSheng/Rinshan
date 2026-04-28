@@ -8,12 +8,11 @@ data_dir: data/annotated_grp
 val_ratio: 0.02
 shuffle_buffer: 5000
 
-lr: 1e-4            # ↑ batch=2048 下合理上限，cql_weight 已降所以稳
+lr: 1e-4
 weight_decay: 0.01
-warmup_steps: 100   # 已有基础，短暂热身即可
+warmup_steps: 100
 total_steps: 150_000
-reset_lr: false      # true = 丢弃旧 scheduler 用新 lr 重建，仅主动改 lr 时临时开启
-weights_only_save: false  # true = 只存权重，跳过 optimizer/scheduler
+weights_only_save: false
 batch_size: 1024          # compile=True 下 93GB/96GB，effective batch=2048
 grad_accum_steps: 2       # 等效 batch=1024
 max_grad_norm: 1.0

@@ -90,29 +90,15 @@ def main():
     device  = trainer.device
 
     # ── 断点续训：优先恢复已有 checkpoint，否则从 Stage 1 初始化 ──
+    # lr 变化时 trainer.load() 自动 reset optimizer/scheduler，无需手动切换 reset_lr
     ckpt_dir = Path(trainer_cfg.save_dir)
-    reset_lr = cfg.get("reset_lr", False)
     existing_ckpts = sorted(
         ckpt_dir.glob("checkpoint_*.pt"),
         key=lambda p: int(p.stem.split("_")[-1]),
     )
-    if existing_ckpts and not reset_lr:
+    if existing_ckpts:
         logger.info(f"Resuming from {existing_ckpts[-1]}")
         trainer.load(existing_ckpts[-1])
-    elif reset_lr:
-        # reset_lr 模式：优先用 best.pt（最佳权重），没有再用最新 checkpoint
-        best_path = ckpt_dir / "best.pt"
-        src = best_path if best_path.exists() else (existing_ckpts[-1] if existing_ckpts else None)
-        if src is None:
-            logger.warning("reset_lr=True but no checkpoint found, falling through to Stage1 init")
-        else:
-            logger.info(f"reset_lr=True: loading weights only from {src}")
-            ckpt = torch.load(src, map_location=device, weights_only=True)
-            trainer.model.load_state_dict(ckpt["model"])
-            if trainer.target_model and ckpt.get("target_model"):
-                trainer.target_model.load_state_dict(ckpt["target_model"])
-            trainer.step = ckpt["step"]
-            logger.info(f"Weights loaded (step={trainer.step}), optimizer/scheduler reset to lr={trainer_cfg.lr:.2e}")
     elif stage1_ckpt and Path(stage1_ckpt).exists():
         logger.info(f"Loading Stage 1 weights from {stage1_ckpt}")
         s1_ckpt = torch.load(stage1_ckpt, map_location=device, weights_only=True)

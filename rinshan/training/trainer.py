@@ -339,6 +339,8 @@ class Trainer:
                 "scheduler":    self.scheduler.state_dict(),
                 "scaler":       self.scaler.state_dict(),
             }
+        # 把训练 lr 存进去，重启时自动检测是否需要 reset
+        payload["lr"] = self.cfg.lr
         torch.save(payload, path)
         logger.info(f"Saved checkpoint → {path}")
 
@@ -348,7 +350,16 @@ class Trainer:
         self.model.load_state_dict(ckpt["model"])
         if self.target_model and ckpt.get("target_model"):
             self.target_model.load_state_dict(ckpt["target_model"])
-        self.optimizer.load_state_dict(ckpt["optimizer"])
-        self.scheduler.load_state_dict(ckpt["scheduler"])
-        self.scaler.load_state_dict(ckpt["scaler"])
-        logger.info(f"Loaded checkpoint ← {path} (step {self.step})")
+        ckpt_lr = ckpt.get("lr", None)
+        if ckpt_lr is not None and abs(ckpt_lr - self.cfg.lr) > 1e-12:
+            # lr 发生变化：只恢复权重，optimizer/scheduler 用新 lr 重建
+            logger.info(
+                f"lr changed ({ckpt_lr:.2e} → {self.cfg.lr:.2e}): "
+                f"weights loaded, optimizer/scheduler reset"
+            )
+        else:
+            # lr 一致：完整恢复，保证续训连续
+            self.optimizer.load_state_dict(ckpt["optimizer"])
+            self.scheduler.load_state_dict(ckpt["scheduler"])
+            self.scaler.load_state_dict(ckpt["scaler"])
+        logger.info(f"Loaded checkpoint ← {path} (step {self.step}, lr={self.cfg.lr:.2e})")
