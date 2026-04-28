@@ -19,7 +19,7 @@ grad_accum_steps: 2       # 等效 batch=1024
 max_grad_norm: 1.0
 
 # CQL 稳定性保护（spike 过一次，小幅降权重）
-cql_weight: 0.3     # 默认值，可在 constants 里覆盖
+cql_weight: 0.1     # 凤凰桌专家数据，质量高，弱化保守约束
 
 # IQL 超参
 target_update_every: 100
