@@ -90,15 +90,28 @@ def main():
     device  = trainer.device
 
     # ── 断点续训：优先恢复已有 checkpoint，否则从 Stage 1 初始化 ──
-    # lr 变化时 trainer.load() 自动 reset optimizer/scheduler，无需手动切换 reset_lr
+    # lr 变化时自动切换到 best.pt 权重，optimizer/scheduler 用新 lr 重建
     ckpt_dir = Path(trainer_cfg.save_dir)
     existing_ckpts = sorted(
         ckpt_dir.glob("checkpoint_*.pt"),
         key=lambda p: int(p.stem.split("_")[-1]),
     )
     if existing_ckpts:
-        logger.info(f"Resuming from {existing_ckpts[-1]}")
-        trainer.load(existing_ckpts[-1])
+        latest = existing_ckpts[-1]
+        # 只 peek lr，不做完整 load
+        peek = torch.load(latest, map_location="cpu", weights_only=True)
+        ckpt_lr = peek.get("lr", None)
+        lr_changed = ckpt_lr is not None and abs(ckpt_lr - trainer_cfg.lr) > 1e-12
+        if lr_changed:
+            # lr 有变化：优先从 best.pt 加载权重（val 最优），没有才用最新 checkpoint
+            best_path = ckpt_dir / "best.pt"
+            src = best_path if best_path.exists() else latest
+            logger.info(f"lr changed ({ckpt_lr:.2e} → {trainer_cfg.lr:.2e}): loading weights from {src}")
+        else:
+            src = latest
+            logger.info(f"Resuming from {src}")
+        del peek
+        trainer.load(src)
     elif stage1_ckpt and Path(stage1_ckpt).exists():
         logger.info(f"Loading Stage 1 weights from {stage1_ckpt}")
         s1_ckpt = torch.load(stage1_ckpt, map_location=device, weights_only=True)
