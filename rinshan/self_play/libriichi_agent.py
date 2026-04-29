@@ -340,13 +340,14 @@ class LibriichiBoostedAgent(RinshanAgent):
             b_pad_mask = encoded["belief_pad_mask"].to(self.device)
 
             self.model.eval()
-            action_idx, q_values = self.model.react(
-                tokens, cand_mask, pad_mask,
-                b_tokens, b_pad_mask,
-                temperature=self.temperature,
-                top_p=self.top_p,
-                greedy=self.greedy,
-            )
+            with torch.inference_mode():
+                action_idx, q_values = self.model.react(
+                    tokens, cand_mask, pad_mask,
+                    b_tokens, b_pad_mask,
+                    temperature=self.temperature,
+                    top_p=self.top_p,
+                    greedy=self.greedy,
+                )
 
             for local_i, orig_i in enumerate(batch_indices):
                 candidates    = batch_candidates[local_i]

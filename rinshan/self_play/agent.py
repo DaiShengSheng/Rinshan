@@ -32,6 +32,87 @@ from rinshan.constants import (
 
 
 # ─────────────────────────────────────────────
+# Quick path helpers
+# ─────────────────────────────────────────────
+
+def _single_forced_response(
+    seat: int,
+    pending: dict,
+    candidates: list[int],
+    state=None,
+    force_one_candidate_only: bool = False,
+) -> Optional[dict]:
+    """
+    在进入模型前处理最常见的强制动作，减少一次完整 Transformer 推理。
+
+    适用场景：
+      1) 只有一个候选动作
+      2) 他家打牌后只有 PASS
+      3) 立直后只能摸切 / 只有一个打牌候选
+    """
+    if not candidates:
+        return {"type": "pass", "actor": seat}
+
+    forced_type = pending.get("forced_type")
+    if forced_type == "dahai":
+        return {
+            "type": "dahai",
+            "actor": seat,
+            "pai": pending.get("forced_pai", "1z"),
+            "tsumogiri": bool(pending.get("forced_tsumogiri", False)),
+        }
+
+    if force_one_candidate_only and len(candidates) == 1:
+        tok = candidates[0]
+        if tok == PASS_TOKEN:
+            if pending.get("in_riichi") and state is not None:
+                last = state.last_draw
+                if last is not None:
+                    return {
+                        "type": "dahai",
+                        "actor": seat,
+                        "pai": last.to_mjai(),
+                        "tsumogiri": True,
+                    }
+            return {"type": "pass", "actor": seat}
+
+        if tok == TSUMO_AGARI_TOKEN:
+            return {"type": "tsumo", "actor": seat}
+        if tok == RON_AGARI_TOKEN:
+            return {
+                "type": "hora",
+                "actor": seat,
+                "target": pending.get("discarder", seat),
+                "pai": pending.get("tile", "1z"),
+            }
+        if tok == RIICHI_TOKEN and state is not None:
+            tile, tsumogiri = _pick_riichi_discard(state, seat, None, candidates)
+            return {
+                "type": "reach",
+                "actor": seat,
+                "pai": tile.to_mjai(),
+                "tsumogiri": tsumogiri,
+            }
+        if DISCARD_OFFSET <= tok < DISCARD_OFFSET + 37 and state is not None:
+            idx = tok - DISCARD_OFFSET
+            tile = Tile(idx) if idx < 34 else {34: Tile(4, True), 35: Tile(13, True), 36: Tile(22, True)}[idx]
+            last = state.last_draw
+            tsumogiri = (
+                last is not None and
+                last.tile_id == tile.tile_id and
+                last.is_aka == tile.is_aka
+            )
+            return {
+                "type": "dahai",
+                "actor": seat,
+                "pai": tile.to_mjai(),
+                "tsumogiri": tsumogiri,
+            }
+
+    return None
+
+
+# ─────────────────────────────────────────────
 # 抽象基类
 # ─────────────────────────────────────────────
 
@@ -195,6 +276,8 @@ class RinshanAgent(BaseAgent):
         self.temperature = temperature
         self.top_p = top_p
         self.greedy = greedy
+        # 仅在显式打开时启用 quick-eval；默认关闭，避免行为漂移。
+        self.enable_quick_eval = False
 
         # 延迟导入（避免循环依赖）
         from rinshan.data.encoder import GameEncoder
@@ -214,8 +297,13 @@ class RinshanAgent(BaseAgent):
         pass
 
     def on_game_end(self, result=None) -> None:
-        # 不做全量 clear，避免并行对局互相污染；缓存通过 game_key 区分。
-        pass
+        # 清理已完成游戏的缓存 key，避免长时间训练内存泄漏
+        if result is not None:
+            prefix = result.game_id + ":"
+            keys_to_del = [k for k in self._state_cache
+                           if isinstance(k, tuple) and k[0].startswith(prefix)]
+            for k in keys_to_del:
+                del self._state_cache[k]
 
     def _get_cached_state(self, seat: int, player_events: list[dict], pending: dict):
         game_key = str(pending.get("_game_key", "default"))
@@ -246,17 +334,32 @@ class RinshanAgent(BaseAgent):
         batch_pending: list[dict] = []
         batch_seats: list[int] = []
         batch_can_tsumo: list[bool] = []
+        # debug / perf counters
+        if not hasattr(self, "_quick_stats"):
+            self._quick_stats = {"forced": 0, "model": 0}
 
         for i, (seat, player_events, pending) in enumerate(requests):
             ptype = pending.get("type")
             state = self._get_cached_state(seat, player_events, pending)
 
             if ptype == "turn_action":
-                candidates, can_tsumo, _ = _build_turn_candidates(state, seat)
+                candidates, can_tsumo, _ = _build_turn_candidates(state, seat, sim=self._sim)
             elif ptype == "naki_or_pass":
-                candidates, can_tsumo, _ = _build_naki_candidates(state, seat, pending)
+                candidates, can_tsumo, _ = _build_naki_candidates(state, seat, pending, sim=self._sim)
             else:
                 responses[i] = {"type": "pass", "actor": seat}
+                continue
+
+            quick = _single_forced_response(
+                seat,
+                pending,
+                candidates,
+                state,
+                force_one_candidate_only=bool(getattr(self, "enable_quick_eval", False)),
+            )
+            if quick is not None:
+                responses[i] = quick
+                self._quick_stats["forced"] += 1
                 continue
 
             if not candidates:
@@ -271,6 +374,7 @@ class RinshanAgent(BaseAgent):
             batch_pending.append(pending)
             batch_seats.append(seat)
             batch_can_tsumo.append(can_tsumo)
+            self._quick_stats["model"] += 1
 
         if batch_encoded:
             encoded = collate_fn(batch_encoded)
@@ -693,13 +797,14 @@ def _calc_deal_in_risk_oracle(state, seat: int) -> list[float]:
     return [min(1.0, danger_count[t] / N_OPP) for t in range(34)]
 
 
-def _build_turn_candidates(state, seat: int) -> tuple[list[int], bool, bool]:
+def _build_turn_candidates(state, seat: int, sim=None) -> tuple[list[int], bool, bool]:
     """
     构建打牌决策候选 token 列表。
     返回 (candidates, can_tsumo, can_riichi)
     """
-    from rinshan.engine.simulator import MjaiSimulator
-    sim = MjaiSimulator()
+    if sim is None:
+        from rinshan.engine.simulator import MjaiSimulator
+        sim = MjaiSimulator()
     cans = sim._compute_discard_candidates(state, seat)
     tokens = sim._build_candidate_tokens(cans, None)
     can_tsumo = cans.can_tsumo
@@ -708,11 +813,12 @@ def _build_turn_candidates(state, seat: int) -> tuple[list[int], bool, bool]:
 
 
 def _build_naki_candidates(state, seat: int,
-                            pending: dict) -> tuple[list[int], bool, bool]:
+                            pending: dict, sim=None) -> tuple[list[int], bool, bool]:
     """构建鸣牌候选 token 列表"""
-    from rinshan.engine.simulator import MjaiSimulator
     from rinshan.constants import RON_AGARI_TOKEN, PASS_TOKEN
-    sim = MjaiSimulator()
+    if sim is None:
+        from rinshan.engine.simulator import MjaiSimulator
+        sim = MjaiSimulator()
 
     discarder = pending.get("discarder", 0)
     pai = Tile.from_mjai(pending["tile"])

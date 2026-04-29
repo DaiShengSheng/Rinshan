@@ -219,13 +219,13 @@ class _GameRunner:
             player_log = board.get_player_log(seat)
             agent = self.agents[seat]
             pending = dict(pending)
-            pending["_game_key"] = f"{self.game_id}:{self.kyoku}:{self.honba}"
+            pending["_game_key"] = self.game_id  # 只用 game_id，避免每局换 key 导致缓存 miss
 
             if hasattr(agent, "react_batch_requests"):
-                key = id(agent)
-                if key not in batch_groups:
-                    batch_groups[key] = {"agent": agent, "items": []}
-                batch_groups[key]["items"].append((seat, player_log, pending))
+                model_key = id(getattr(agent, "model", agent))
+                if model_key not in batch_groups:
+                    batch_groups[model_key] = {"agent": agent, "items": []}
+                batch_groups[model_key]["items"].append((seat, player_log, pending))
             else:
                 response = agent.react(seat, player_log, pending)
                 board.push_reaction(seat, response)
@@ -350,14 +350,19 @@ class Arena:
                     player_log = board.get_player_log(seat)
                     agent = runner.agents[seat]
                     pending = dict(pending)
-                    pending["_game_key"] = f"{runner.game_id}:{runner.kyoku}:{runner.honba}"
+                    # 只用 game_id 做 key：_get_cached_state 通过事件数增量判断是否需要重建，
+                    # 加入 kyoku/honba 后每局换局时 key 必然 miss，强制全量重放，反而更慢。
+                    pending["_game_key"] = runner.game_id
 
                     if hasattr(agent, "react_batch_requests"):
-                        key = id(agent)
-                        if key not in batch_groups:
-                            batch_groups[key] = {"agent": agent, "items": [], "targets": []}
-                        batch_groups[key]["items"].append((seat, player_log, pending))
-                        batch_groups[key]["targets"].append((runner, seat))
+                        # 按 id(agent.model) 分组：共享同一模型的 agent
+                        # （如 versus 模式的 ch_0/ch_1）合并入同一 batch，
+                        # 避免 batch size 被不必要地切半。
+                        model_key = id(getattr(agent, "model", agent))
+                        if model_key not in batch_groups:
+                            batch_groups[model_key] = {"agent": agent, "items": [], "targets": []}
+                        batch_groups[model_key]["items"].append((seat, player_log, pending))
+                        batch_groups[model_key]["targets"].append((runner, seat))
                     else:
                         response = agent.react(seat, player_log, pending)
                         board.push_reaction(seat, response)
