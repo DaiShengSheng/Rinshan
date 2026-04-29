@@ -54,7 +54,7 @@ impl OneVsThree {
 
             let mut rankings = [0; 4];
             for (i, result) in results.iter().enumerate() {
-                let rank = result.rankings().rank_by_player[i % 4];
+                let rank = result.compute_rankings().rank_by_player[i % 4];
                 rankings[rank as usize] += 1;
             }
             Ok(rankings)
@@ -79,7 +79,7 @@ impl OneVsThree {
 
             let mut rankings = [0; 4];
             for (i, result) in results.iter().enumerate() {
-                let rank = result.rankings().rank_by_player[i % 4];
+                let rank = result.compute_rankings().rank_by_player[i % 4];
                 rankings[rank as usize] += 1;
             }
             Ok(rankings)
@@ -104,7 +104,7 @@ impl OneVsThree {
 
             let mut rankings = [0; 4];
             for (i, result) in results.iter().enumerate() {
-                let rank = result.rankings().rank_by_player[i % 4];
+                let rank = result.compute_rankings().rank_by_player[i % 4];
                 rankings[rank as usize] += 1;
             }
             Ok(rankings)
@@ -215,7 +215,7 @@ impl OneVsThree {
                         .iter()
                         .collect();
 
-                    let log = game_result.dump_json_log()?;
+                    let log = game_result.dump_json_log_string()?;
                     let mut comp = GzEncoder::new(log.as_bytes(), Compression::best());
                     let mut f = File::create(filename)?;
                     io::copy(&mut comp, &mut f)?;

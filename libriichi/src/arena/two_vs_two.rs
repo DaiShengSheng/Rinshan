@@ -39,7 +39,7 @@ impl TwoVsTwo {
         seed_start: (u64, u64),
         seed_count: u64,
         py: Python<'_>,
-    ) -> Result<()> {
+    ) -> Result<Vec<GameResult>> {
         // `allow_threads` is required, otherwise it will block python GC to
         // run, leading to memory leaks, since this function is doing long
         // tasks.
@@ -49,8 +49,7 @@ impl TwoVsTwo {
                 |player_ids| new_py_agent(champion, player_ids),
                 seed_start,
                 seed_count,
-            )?;
-            Ok(())
+            )
         })
     }
 
@@ -216,7 +215,7 @@ impl TwoVsTwo {
                         .iter()
                         .collect();
 
-                    let log = game_result.dump_json_log()?;
+                    let log = game_result.dump_json_log_string()?;
                     let mut comp = GzEncoder::new(log.as_bytes(), Compression::best());
                     let mut f = File::create(filename)?;
                     io::copy(&mut comp, &mut f)?;
@@ -310,7 +309,7 @@ impl TwoVsTwo {
                 .iter()
                 .collect();
 
-            let log = results[0].dump_json_log()?;
+            let log = results[0].dump_json_log_string()?;
             let mut comp = GzEncoder::new(log.as_bytes(), Compression::best());
             let mut f = File::create(filename)?;
             io::copy(&mut comp, &mut f)?;

@@ -2,6 +2,7 @@ mod board;
 mod game;
 mod one_vs_three;
 mod result;
+mod self_play;
 mod two_vs_two;
 
 pub use board::Board;
@@ -9,6 +10,7 @@ pub use result::GameResult;
 
 use crate::py_helper::add_submodule;
 use one_vs_three::OneVsThree;
+use self_play::SelfPlay;
 use two_vs_two::TwoVsTwo;
 
 use pyo3::prelude::*;
@@ -20,6 +22,8 @@ pub(crate) fn register_module(
 ) -> PyResult<()> {
     let m = PyModule::new(py, "arena")?;
     m.add_class::<OneVsThree>()?;
+    m.add_class::<SelfPlay>()?;
     m.add_class::<TwoVsTwo>()?;
+    m.add_class::<GameResult>()?;
     add_submodule(py, prefix, super_mod, &m)
 }

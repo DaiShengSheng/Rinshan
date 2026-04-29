@@ -39,7 +39,7 @@ from rinshan.model.full_model import RinshanModel
 from rinshan.model.transformer import TransformerConfig
 from rinshan.constants       import MODEL_CONFIGS
 from rinshan.self_play.agent          import RinshanAgent, RandomAgent
-from rinshan.self_play.arena          import Arena
+from rinshan.self_play.arena          import Arena, GameRecord
 from rinshan.self_play.league         import League
 from rinshan.self_play.online_buffer  import OnlineBuffer
 from rinshan.self_play.libriichi_agent import LibriichiBoostedAgent, libriichi_available
@@ -81,12 +81,12 @@ def _build_agents(
     n_seats: int = 4,
 ) -> list:
     """
-    构建 4 席 agent：
+    旧版 Python Arena 路径：
       - 至少 1 席用当前最新模型
       - 其余席位从 League 中采样历史模型（若 League 为空则也用当前模型）
 
-    n_seats 个 agent 对象（RinshanAgent），每个持有独立的模型引用。
-    League 的对手模型 CPU 推理，当前模型 GPU 推理（如可用）。
+    注意：该路径仅保留用于 fallback / 调试。
+    Stage4 正式生成建议使用下方的 Rust SelfPlay 后端。
     """
     temp = float(sp_cfg.get("temperature", 0.8))
     top_p = float(sp_cfg.get("top_p", 0.9))
@@ -94,11 +94,9 @@ def _build_agents(
 
     agents = []
     for i in range(n_seats):
-        # 优先使用 LibriichiBoostedAgent（候选生成 Rust 化），不可用时自动降级
         AgentCls = LibriichiBoostedAgent if libriichi_available() else RinshanAgent
 
         if i == 0:
-            # 席位 0 始终用当前最新模型（GPU）
             agent = AgentCls(
                 model=current_model,
                 name="current",
@@ -106,7 +104,6 @@ def _build_agents(
                 temperature=temp, top_p=top_p, greedy=greedy,
             )
         else:
-            # 其余席位从 League 采样
             sd = league.sample_state_dict()
             if sd is not None:
                 from rinshan.constants import MODEL_CONFIGS
@@ -123,10 +120,66 @@ def _build_agents(
                     temperature=temp, top_p=top_p, greedy=greedy,
                 )
             else:
-                # League 为空：用 RandomAgent
                 agent = RandomAgent(name=f"random_{i}", seed=i)
         agents.append(agent)
     return agents
+
+
+def _records_from_rust_results(results) -> list[GameRecord]:
+    """把 libriichi.arena.GameResult 转成现有 OnlineBuffer 可消费的 GameRecord。"""
+    records: list[GameRecord] = []
+    for i, r in enumerate(results):
+        text = r.dump_json_log()
+        lines = [line for line in text.splitlines() if line.strip()]
+        events = [__import__("json").loads(line) for line in lines]
+        kyoku_logs: list[list[dict]] = []
+        current: list[dict] = []
+        for ev in events:
+            etype = ev.get("type")
+            if etype == "start_game":
+                continue
+            if etype == "end_game":
+                break
+            current.append(ev)
+            if etype == "end_kyoku":
+                kyoku_logs.append(current)
+                current = []
+
+        ranks = list(r.rankings())
+        records.append(GameRecord(
+            game_id=f"rust_sp_{r.seed[0]}_{i:06d}",
+            seed=tuple(r.seed),
+            agent_names=list(r.names),
+            final_scores=list(r.scores),
+            ranks=ranks,
+            kyoku_logs=kyoku_logs,
+        ))
+    return records
+
+
+def _run_rust_self_play(current_model: RinshanModel, device: torch.device, sp_cfg: dict, iteration: int):
+    """
+    Rust SelfPlay 后端：四席同模自对弈。
+    这是更合理的 Stage4 主路径：和不断成长的自己对弈，而不是 2v2 对抗旧模型。
+    """
+    from libriichi.arena import SelfPlay
+
+    temp = float(sp_cfg.get("temperature", 0.8))
+    top_p = float(sp_cfg.get("top_p", 0.9))
+    greedy = bool(sp_cfg.get("greedy", False))
+    n_games = int(sp_cfg.get("n_games_per_iter", 32))
+
+    agent = RinshanAgent(
+        model=current_model,
+        name="current",
+        device=str(device),
+        temperature=temp,
+        top_p=top_p,
+        greedy=greedy,
+    )
+    arena = SelfPlay(disable_progress_bar=True)
+    results = arena.py_self_play(agent, (iteration * 1000, 0), n_games)
+    return _records_from_rust_results(results)
 
 
 # ─────────────────────────────────────────────
@@ -157,6 +210,7 @@ def main():
     sp_cfg = cfg.get("self_play", {})
     n_games_per_iter = int(sp_cfg.get("n_games_per_iter", 32))
     game_length      = sp_cfg.get("game_length", "hanchan")
+    self_play_backend = sp_cfg.get("backend", "rust_self_play")
 
     # League 参数
     lc_cfg           = cfg.get("league", {})
@@ -234,18 +288,21 @@ def main():
         t_iter = time.time()
 
         # ── 1. 自对弈 ────────────────────────────
-        agents = _build_agents(
-            current_model, league, device, sp_cfg
-        )
-        arena = Arena(
-            agents         = agents,
-            n_games        = n_games_per_iter,
-            game_length    = game_length,
-            base_seed      = iteration * 1000,
-            agent_rotation = "round_robin",
-            show_progress  = False,
-        )
-        records = arena.run()
+        if self_play_backend == "rust_self_play":
+            records = _run_rust_self_play(current_model, device, sp_cfg, iteration)
+        else:
+            agents = _build_agents(
+                current_model, league, device, sp_cfg
+            )
+            arena = Arena(
+                agents         = agents,
+                n_games        = n_games_per_iter,
+                game_length    = game_length,
+                base_seed      = iteration * 1000,
+                agent_rotation = "round_robin",
+                show_progress  = False,
+            )
+            records = arena.run()
         total_games += len(records)
 
         n_new = buffer.ingest_records(records)

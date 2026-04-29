@@ -274,20 +274,21 @@ class RinshanAgent(BaseAgent):
 
         if batch_encoded:
             encoded = collate_fn(batch_encoded)
-            tokens     = encoded["tokens"].to(self.device)
-            cand_mask  = encoded["candidate_mask"].to(self.device)
-            pad_mask   = encoded["pad_mask"].to(self.device)
-            b_tokens   = encoded["belief_tokens"].to(self.device)
-            b_pad_mask = encoded["belief_pad_mask"].to(self.device)
+            tokens     = encoded["tokens"].to(self.device, non_blocking=True)
+            cand_mask  = encoded["candidate_mask"].to(self.device, non_blocking=True)
+            pad_mask   = encoded["pad_mask"].to(self.device, non_blocking=True)
+            b_tokens   = encoded["belief_tokens"].to(self.device, non_blocking=True)
+            b_pad_mask = encoded["belief_pad_mask"].to(self.device, non_blocking=True)
 
             self.model.eval()
-            action_idx, q_values = self.model.react(
-                tokens, cand_mask, pad_mask,
-                b_tokens, b_pad_mask,
-                temperature=self.temperature,
-                top_p=self.top_p,
-                greedy=self.greedy,
-            )
+            with torch.inference_mode():
+                action_idx, q_values = self.model.react(
+                    tokens, cand_mask, pad_mask,
+                    b_tokens, b_pad_mask,
+                    temperature=self.temperature,
+                    top_p=self.top_p,
+                    greedy=self.greedy,
+                )
 
             for local_i, orig_i in enumerate(batch_indices):
                 candidates = batch_candidates[local_i]

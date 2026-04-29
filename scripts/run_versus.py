@@ -102,15 +102,57 @@ def main():
     )
 
     t0 = time.time()
-    # seed_start 是 (nonce, key) tuple，seed_count 是每边对局数
-    # TwoVsTwo 每个 seed 跑 2 局（互换座位），所以 seed_count = n_games // 2
-    result = arena.py_vs_py(agent_ch, agent_bl, (args.seed, 0), args.n_games // 2)
+    results = arena.py_vs_py(agent_ch, agent_bl, (args.seed, 0), args.n_games // 2)
     elapsed = time.time() - t0
 
-    # result 是 libriichi.stat 里的统计对象
+    def summarize(group_name: str, seat_pred):
+        ranks = []
+        scores = []
+        for r in results:
+            rr = list(r.rankings())
+            sc = list(r.scores)
+            for seat in range(4):
+                if seat_pred(seat):
+                    ranks.append(rr[seat])
+                    scores.append(sc[seat])
+        avg_rank = sum(x + 1 for x in ranks) / max(len(ranks), 1)
+        first_rate = sum(1 for x in ranks if x == 0) / max(len(ranks), 1) * 100
+        avg_score = sum(scores) / max(len(scores), 1)
+        return avg_rank, first_rate, avg_score
+
+    # TwoVsTwo 固定是 2v2：同名模型坐在两席。
+    # 这里按名字区分即可，不依赖 split。
+    challenger_names = {"challenger"}
+    baseline_names = {"baseline"}
+
+    ch_ranks, ch_scores = [], []
+    bl_ranks, bl_scores = [], []
+    for r in results:
+        rr = list(r.rankings())
+        sc = list(r.scores)
+        names = list(r.names)
+        for seat in range(4):
+            if names[seat] in challenger_names:
+                ch_ranks.append(rr[seat])
+                ch_scores.append(sc[seat])
+            elif names[seat] in baseline_names:
+                bl_ranks.append(rr[seat])
+                bl_scores.append(sc[seat])
+
+    ch_avg = sum(x + 1 for x in ch_ranks) / max(len(ch_ranks), 1)
+    bl_avg = sum(x + 1 for x in bl_ranks) / max(len(bl_ranks), 1)
+    ch_first = sum(1 for x in ch_ranks if x == 0) / max(len(ch_ranks), 1) * 100
+    bl_first = sum(1 for x in bl_ranks if x == 0) / max(len(bl_ranks), 1) * 100
+    ch_score = sum(ch_scores) / max(len(ch_scores), 1)
+    bl_score = sum(bl_scores) / max(len(bl_scores), 1)
+    delta = ch_avg - bl_avg
+    verdict = ("↑ Challenger 胜" if delta < -0.05 else "↓ Baseline 胜" if delta > 0.05 else "→ 持平")
+
     print(f"\n{'='*58}")
-    print(f"对战完成  {args.n_games} 局 | 用时 {elapsed:.1f}s | 速度 {args.n_games/elapsed:.2f} 局/s")
-    print(result)
+    print(f"对战完成  {len(results)} 局 | 用时 {elapsed:.1f}s | 速度 {len(results)/elapsed:.2f} 局/s")
+    print(f"Challenger  平均顺位 {ch_avg:.3f}  一位率 {ch_first:.1f}%  平均得分 {ch_score:.0f}")
+    print(f"Baseline    平均顺位 {bl_avg:.3f}  一位率 {bl_first:.1f}%  平均得分 {bl_score:.0f}")
+    print(f"顺位差 Δ={delta:+.3f}  {verdict}")
     print("="*58)
 
 

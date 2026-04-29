@@ -284,10 +284,13 @@ impl BatchGame {
         bar.enable_steady_tick(Duration::from_millis(150));
 
         while !games.is_empty() {
+            // Phase 1: poll every game, so all set_scene() calls are collected first.
             for (_, game) in &mut games {
                 game.poll(agents)?;
             }
 
+            // Phase 2: commit every game after all scenes are ready. This lets
+            // each BatchAgent aggregate a larger cross-game batch in get_reaction().
             for (idx_for_rm, (game_idx, game)) in games.iter_mut().enumerate() {
                 if let Some(game_result) = game.commit(agents)? {
                     game_results[*game_idx] = game_result;

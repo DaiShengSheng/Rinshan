@@ -5,6 +5,7 @@ model_preset: base
 
 # 自对弈
 self_play:
+  backend: rust_self_play
   n_games_per_iter: 128
   game_length: hanchan    # hanchan / tonpuu
   device: cuda
