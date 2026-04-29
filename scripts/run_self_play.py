@@ -102,7 +102,9 @@ def parse_args():
                    help="贪心解码（argmax，不随机）")
     p.add_argument("--n_agents",      type=int, default=1,
                    help="ai 模式：参与自对弈的 AI agent 数量（1=自我对局，4=四家各自独立）")
-    # 显示控制
+    # 日志 / 显示控制
+    p.add_argument("--log_dir",       type=str, default=None,
+                   help="保存每局 mjai 原始日志的目录（仅 Rust 后端 versus 模式支持，用于复盘调试）")
     p.add_argument("--quiet",         action="store_true")
     return p.parse_args()
 
@@ -257,7 +259,8 @@ def run_rust_versus(args) -> None:
     agent_bl = RinshanAgent(model_bl, name="bl", device=args.device,
                             temperature=args.temperature, top_p=args.top_p, greedy=args.greedy)
 
-    arena       = TwoVsTwo(disable_progress_bar=args.quiet)
+    arena       = TwoVsTwo(disable_progress_bar=args.quiet,
+                          log_dir=args.log_dir)
     all_results = []
     generated   = 0
     t0          = time.time()
