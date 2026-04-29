@@ -314,44 +314,49 @@ class LibriichiBoostedAgent(RinshanAgent):
             # ── 候选生成（Rust）──────────────────────────────
             tracker = self._get_lr_tracker(seat, game_key, player_events)
             candidates = tracker.build_candidates(pending)
+            ptype = str(pending.get("type", ""))
 
-             # turn_action 下 Rust pending 是动作合法性的权威来源。
-             # libriichi 的 PlayerState.last_cans 已经很准，但这里仍用 pending
-             # 做最后 reconcile，避免 Python 侧误产生 Rust 不接受的动作。
-             if ptype == "turn_action":
-                 if "can_tsumo" in pending:
-                     if pending.get("can_tsumo", False):
-                         if TSUMO_AGARI_TOKEN not in candidates:
-                             candidates = [TSUMO_AGARI_TOKEN] + candidates
-                     else:
-                         candidates = [t for t in candidates if t != TSUMO_AGARI_TOKEN]
-                 if "can_riichi" in pending:
-                     if pending.get("can_riichi", False):
-                         if RIICHI_TOKEN not in candidates:
-                             candidates = [RIICHI_TOKEN] + candidates
-                     else:
-                         candidates = [t for t in candidates if t != RIICHI_TOKEN]
-                 from rinshan.constants import RYUKYOKU_TOKEN
-                 if "can_ryukyoku" in pending:
-                     if pending.get("can_ryukyoku", False):
-                         if RYUKYOKU_TOKEN not in candidates:
-                             candidates.append(RYUKYOKU_TOKEN)
-                     else:
-                         candidates = [t for t in candidates if t != RYUKYOKU_TOKEN]
-                 if "can_ankan" in pending and not pending.get("can_ankan", False):
-                     candidates = [t for t in candidates
-                                   if not (ANKAN_OFFSET <= t < ANKAN_OFFSET + NUM_TILE_TYPES)]
-                 if "can_kakan" in pending and not pending.get("can_kakan", False):
-                     candidates = [t for t in candidates
-                                   if not (KAKAN_OFFSET <= t < KAKAN_OFFSET + NUM_TILE_TYPES)]
+            # turn_action 下 Rust pending 是动作合法性的权威来源。
+            # libriichi 的 PlayerState.last_cans 已经很准，但这里仍用 pending
+            # 做最后 reconcile，避免 Python 侧误产生 Rust 不接受的动作。
+            if ptype == "turn_action":
+                if "can_tsumo" in pending:
+                    if pending.get("can_tsumo", False):
+                        if TSUMO_AGARI_TOKEN not in candidates:
+                            candidates = [TSUMO_AGARI_TOKEN] + candidates
+                    else:
+                        candidates = [t for t in candidates if t != TSUMO_AGARI_TOKEN]
+                if "can_riichi" in pending:
+                    if pending.get("can_riichi", False):
+                        if RIICHI_TOKEN not in candidates:
+                            candidates = [RIICHI_TOKEN] + candidates
+                    else:
+                        candidates = [t for t in candidates if t != RIICHI_TOKEN]
+                from rinshan.constants import RYUKYOKU_TOKEN
+                if "can_ryukyoku" in pending:
+                    if pending.get("can_ryukyoku", False):
+                        if RYUKYOKU_TOKEN not in candidates:
+                            candidates.append(RYUKYOKU_TOKEN)
+                    else:
+                        candidates = [t for t in candidates if t != RYUKYOKU_TOKEN]
+                if "can_ankan" in pending and not pending.get("can_ankan", False):
+                    candidates = [
+                        t for t in candidates
+                        if not (ANKAN_OFFSET <= t < ANKAN_OFFSET + NUM_TILE_TYPES)
+                    ]
+                if "can_kakan" in pending and not pending.get("can_kakan", False):
+                    candidates = [
+                        t for t in candidates
+                        if not (KAKAN_OFFSET <= t < KAKAN_OFFSET + NUM_TILE_TYPES)
+                    ]
 
-             if not candidates:
-                 responses[i] = {"type": "pass", "actor": seat}
-                 continue
+            if not candidates:
+                responses[i] = {"type": "pass", "actor": seat}
+                continue
 
             # ── 编码仍需 Python GameState（token 序列） ──────
             state = self._get_cached_state(seat, player_events, pending)
-            ann   = _state_to_annotation(state, seat, player_events, candidates)
+            ann = _state_to_annotation(state, seat, player_events, candidates)
 
             batch_indices.append(i)
             batch_encoded.append(self._encoder.encode(ann))
