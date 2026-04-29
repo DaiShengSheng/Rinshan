@@ -34,6 +34,7 @@
 ///   {"type":"tsumo", "actor":0}
 ///   {"type":"pass",  "actor":1}
 use super::{BatchAgent, InvisibleState};
+use crate::must_tile;
 use crate::arena::GameResult;
 use crate::mjai::{Event, EventExt};
 use crate::state::PlayerState;
@@ -299,6 +300,65 @@ impl RinshanBatchAgent {
             "can_ryukyoku".into(),
             json::Value::Bool(cans.can_ryukyoku),
         );
+
+        // Quick-path 1: accepted riichi with no optional side action => forced tsumogiri.
+        if state.self_riichi_accepted()
+            && cans.can_discard
+            && !cans.can_tsumo_agari
+            && !cans.can_ankan
+            && !cans.can_kakan
+            && !cans.can_ryukyoku
+        {
+            if let Some(tile) = state.last_self_tsumo() {
+                m.insert("forced_type".into(), json::Value::String("dahai".into()));
+                m.insert(
+                    "forced_pai".into(),
+                    json::Value::String(libriichi_tile_to_rinshan(&tile.to_string()).to_owned()),
+                );
+                m.insert("forced_tsumogiri".into(), json::Value::Bool(true));
+            }
+        }
+
+        // Quick-path 2: exactly one discard candidate and no competing optional action.
+        if cans.can_discard
+            && !cans.can_riichi
+            && !cans.can_tsumo_agari
+            && !cans.can_ankan
+            && !cans.can_kakan
+            && !cans.can_ryukyoku
+        {
+            let candidates = state.discard_candidates_aka();
+            let mut only_idx = None;
+            for (i, &ok) in candidates.iter().enumerate() {
+                if !ok {
+                    continue;
+                }
+                match only_idx.take() {
+                    None => only_idx = Some(i),
+                    Some(_) => {
+                        only_idx = Some(usize::MAX);
+                        break;
+                    }
+                }
+            }
+            if let Some(i) = only_idx.filter(|&i| i != usize::MAX) {
+                let pai = match i as u8 {
+                    0..=33 => must_tile!(i),
+                    34 => must_tile!(34),
+                    35 => must_tile!(35),
+                    36 => must_tile!(36),
+                    _ => unreachable!(),
+                };
+                let tsumogiri = state.last_self_tsumo().is_some_and(|t| t == pai);
+                m.insert("forced_type".into(), json::Value::String("dahai".into()));
+                m.insert(
+                    "forced_pai".into(),
+                    json::Value::String(libriichi_tile_to_rinshan(&pai.to_string()).to_owned()),
+                );
+                m.insert("forced_tsumogiri".into(), json::Value::Bool(tsumogiri));
+            }
+        }
+
         m.insert("_game_key".into(), json::Value::String(game_key.to_owned()));
         json::Value::Object(m)
     }

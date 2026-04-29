@@ -7,6 +7,7 @@ model_preset: base
 self_play:
   backend: rust_self_play
   n_games_per_iter: 128
+  parallel_games: 64      # 单个 wave 并发局数；决定 GPU batch 大小
   game_length: hanchan    # hanchan / tonpuu
   device: cuda
 

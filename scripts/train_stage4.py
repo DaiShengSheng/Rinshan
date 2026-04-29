@@ -160,7 +160,13 @@ def _records_from_rust_results(results) -> list[GameRecord]:
 def _run_rust_self_play(current_model: RinshanModel, device: torch.device, sp_cfg: dict, iteration: int):
     """
     Rust SelfPlay 后端：四席同模自对弈。
-    这是更合理的 Stage4 主路径：和不断成长的自己对弈，而不是 2v2 对抗旧模型。
+
+    关键参数：
+      - n_games_per_iter: 本轮总共要生成多少局
+      - parallel_games:   单个 wave 同时并发多少局（决定 GPU batch 大小）
+
+    对吞吐量而言，parallel_games 比总局数更关键：
+    更大的并发会把同一时刻的待决策状态聚合成更大的 batch，显著提升 GPU 利用率。
     """
     from libriichi.arena import SelfPlay
 
@@ -168,6 +174,8 @@ def _run_rust_self_play(current_model: RinshanModel, device: torch.device, sp_cf
     top_p = float(sp_cfg.get("top_p", 0.9))
     greedy = bool(sp_cfg.get("greedy", False))
     n_games = int(sp_cfg.get("n_games_per_iter", 32))
+    parallel_games = int(sp_cfg.get("parallel_games", n_games))
+    parallel_games = max(1, min(parallel_games, n_games))
 
     agent = RinshanAgent(
         model=current_model,
@@ -178,8 +186,19 @@ def _run_rust_self_play(current_model: RinshanModel, device: torch.device, sp_cf
         greedy=greedy,
     )
     arena = SelfPlay(disable_progress_bar=True)
-    results = arena.py_self_play(agent, (iteration * 1000, 0), n_games)
-    return _records_from_rust_results(results)
+
+    all_records: list[GameRecord] = []
+    generated = 0
+    wave = 0
+    while generated < n_games:
+        wave_games = min(parallel_games, n_games - generated)
+        seed_start = (iteration * 100000 + generated, 0)
+        results = arena.py_self_play(agent, seed_start, wave_games)
+        all_records.extend(_records_from_rust_results(results))
+        generated += wave_games
+        wave += 1
+
+    return all_records
 
 
 # ─────────────────────────────────────────────

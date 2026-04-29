@@ -33,7 +33,8 @@ def main():
     p = argparse.ArgumentParser()
     p.add_argument("--ckpt", required=True)
     p.add_argument("--model_preset", choices=["nano", "base", "large"], default="base")
-    p.add_argument("--n_games", type=int, default=16)
+    p.add_argument("--n_games", type=int, default=32, help="总局数")
+    p.add_argument("--parallel_games", type=int, default=None, help="单个 wave 并发局数；默认等于 n_games")
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--device", default="cuda")
     p.add_argument("--greedy", action="store_true")
@@ -43,14 +44,24 @@ def main():
     agent = RinshanAgent(model, name="selfplay", device=args.device, greedy=args.greedy)
     arena = SelfPlay(disable_progress_bar=True)
 
+    parallel_games = args.parallel_games or args.n_games
+    parallel_games = max(1, min(parallel_games, args.n_games))
+
+    all_results = []
+    generated = 0
     t0 = time.time()
-    results = arena.py_self_play(agent, (args.seed, 0), args.n_games)
+    while generated < args.n_games:
+        wave_games = min(parallel_games, args.n_games - generated)
+        results = arena.py_self_play(agent, (args.seed + generated, 0), wave_games)
+        all_results.extend(results)
+        generated += wave_games
     elapsed = time.time() - t0
     print({
-        "games": len(results),
+        "games": len(all_results),
+        "parallel_games": parallel_games,
         "elapsed_s": round(elapsed, 3),
-        "games_per_s": round(len(results) / elapsed, 3),
-        "s_per_game": round(elapsed / len(results), 3),
+        "games_per_s": round(len(all_results) / elapsed, 3),
+        "s_per_game": round(elapsed / len(all_results), 3),
     })
 
 
