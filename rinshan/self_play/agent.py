@@ -323,6 +323,32 @@ class RinshanAgent(BaseAgent):
         self._state_cache[cache_key] = {"state": state, "n_events": len(player_events)}
         return state
 
+    def react_batch_requests_json(self, batch_json: str) -> str:
+        """
+        Rust 快速路径接口：接收 JSON 字符串，返回 JSON 字符串。
+
+        batch_json: JSON string 编码 list of [seat, events_json_str, pending_json_str]
+            - seat: int
+            - events_json_str: str (JSON array of event dicts)
+            - pending_json_str: str (JSON object)
+
+        返回: JSON string 编码 list of response dicts
+
+        比 react_batch_requests 快很多，因为：
+          1. 省去 Rust→Python PyDict 构建（每事件）
+          2. 省去 Python→Rust json.dumps（每响应）
+          3. 直接 json.loads 解析整批，一次 Python 调用
+        """
+        import json as _json
+        items = _json.loads(batch_json)
+        requests = []
+        for seat, events_json_str, pending_json_str in items:
+            player_events = _json.loads(events_json_str)
+            pending       = _json.loads(pending_json_str)
+            requests.append((seat, player_events, pending))
+        responses = self.react_batch_requests(requests)
+        return _json.dumps(responses, ensure_ascii=False)
+
     def react_batch_requests(self, requests: list[tuple[int, list[dict], dict]]) -> list[dict]:
         from rinshan.data.dataset import collate_fn
 

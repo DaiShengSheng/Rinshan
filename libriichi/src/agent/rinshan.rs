@@ -138,9 +138,15 @@ pub struct RinshanBatchAgent {
     name: String,
     player_ids: Vec<u8>,
 
-    /// Per-player mjai event log (from that player's PoV).
+    /// Per-player mjai event log (from that player's PoV), stored as
+    /// pre-serialised JSON strings so we can pass a single JSON array
+    /// to Python instead of building PyDict objects per event.
     /// Index matches `player_ids`.
-    logs: Vec<Vec<json::Value>>,
+    logs: Vec<Vec<String>>,
+
+    /// Track how many arena-log events each slot has already serialised,
+    /// so we only process the *new* suffix on each set_scene call.
+    log_cursor: Vec<usize>,
 
     /// Pending decisions collected during set_scene, consumed in get_reaction.
     /// None means no decision needed for this slot.
@@ -173,6 +179,7 @@ impl RinshanBatchAgent {
             name,
             player_ids: player_ids.to_vec(),
             logs: vec![vec![]; size],
+            log_cursor: vec![0; size],
             pending: vec![None; size],
             responses: vec![None; size],
             evaluated: false,
@@ -180,107 +187,96 @@ impl RinshanBatchAgent {
         })
     }
 
-    /// Append one event to all logs, but only the player-visible version:
-    /// for Tsumo, hide opponent's pai (replace with "?"); keep everything
-    /// else as-is (same simplification used in the Python Arena).
+    /// Incrementally append new events from `log[cursor..]` to the per-player
+    /// pre-serialised log. Only processes the *new* suffix since the last call,
+    /// avoiding O(full-history) work on every decision step.
     fn push_event(&mut self, index: usize, log: &[EventExt]) {
-        // Rebuild log slice from scratch each scene (simpler and correct).
-        // We rebuild from the full log passed by the arena, filtering to the
-        // PoV of player_ids[index].
         let seat = self.player_ids[index] as usize;
-        self.logs[index] = log
-            .iter()
-            .filter_map(|ext| {
-                let ev = &ext.event;
+        let cursor = self.log_cursor[index];
+
+        for ext in &log[cursor..] {
+            let ev = &ext.event;
+            let json_str: Option<String> = (|| -> Option<String> { match ev {
                 // Hide opponent tsumo pai.
-                let visible = match ev {
-                    Event::Tsumo { actor, pai } if *actor as usize != seat => {
-                        let mut v = json::to_value(ev).ok()?;
-                        if let Some(o) = v.as_object_mut() {
-                            o.insert("pai".to_owned(), json::Value::String("?".to_owned()));
-                        }
-                        v
+                Event::Tsumo { actor, .. } if *actor as usize != seat => {
+                    let mut v = json::to_value(ev).ok()?;
+                    if let Some(o) = v.as_object_mut() {
+                        o.insert("pai".to_owned(), json::Value::String("?".to_owned()));
                     }
-                    // StartKyoku — hide other players' tehais.
-                    Event::StartKyoku {
-                        bakaze,
-                        dora_marker,
-                        kyoku,
-                        honba,
-                        kyotaku,
-                        oya,
-                        scores,
-                        tehais,
-                    } => {
-                        let masked_tehais: Vec<json::Value> = tehais
-                            .iter()
-                            .enumerate()
-                            .map(|(i, hand)| {
-                                if i == seat {
-                                    // Translate tile names inside own hand
-                                    let tiles: Vec<json::Value> = hand
-                                        .iter()
-                                        .map(|t| {
-                                            json::Value::String(
-                                                libriichi_tile_to_rinshan(&t.to_string()).to_owned(),
-                                            )
-                                        })
-                                        .collect();
-                                    json::Value::Array(tiles)
-                                } else {
-                                    // 13 "?" tiles
-                                    json::Value::Array(
-                                        (0..13)
-                                            .map(|_| json::Value::String("?".to_owned()))
-                                            .collect(),
-                                    )
-                                }
-                            })
-                            .collect();
-                        let mut m = json::Map::new();
-                        m.insert("type".into(), "start_kyoku".into());
-                        m.insert(
-                            "bakaze".into(),
-                            json::Value::String(
-                                libriichi_tile_to_rinshan(&bakaze.to_string()).to_owned(),
-                            ),
-                        );
-                        m.insert(
-                            "dora_marker".into(),
-                            json::Value::String(
-                                libriichi_tile_to_rinshan(&dora_marker.to_string()).to_owned(),
-                            ),
-                        );
-                        m.insert("kyoku".into(), json::Value::Number((*kyoku).into()));
-                        m.insert("honba".into(), json::Value::Number((*honba).into()));
-                        m.insert("kyotaku".into(), json::Value::Number((*kyotaku).into()));
-                        m.insert("oya".into(), json::Value::Number((*oya).into()));
-                        m.insert(
-                            "scores".into(),
-                            json::Value::Array(
-                                scores.iter().map(|&s| json::Value::Number(s.into())).collect(),
-                            ),
-                        );
-                        m.insert("tehais".into(), json::Value::Array(masked_tehais));
-                        json::Value::Object(m)
-                    }
-                    _ => {
-                        let mut v = json::to_value(ev).ok()?;
-                        translate_tiles_to_rinshan(&mut v);
-                        v
-                    }
-                };
-                // For the special-cased branches above (Tsumo hidden, StartKyoku)
-                // we've already translated inline; for the catch-all branch
-                // translation was done inside. But Tsumo (hidden) still needs
-                // the non-pai fields translated.
-                if matches!(ev, Event::Tsumo { actor, .. } if *actor as usize != seat) {
-                    // Only the non-pai fields (actor is a number, no translation needed)
-                    // Nothing else to translate in a hidden tsumo.
+                    json::to_string(&v).ok()
                 }
-                Some(visible)
-            })
-            .collect();
+                // StartKyoku — hide other players' tehais, translate tile names.
+                Event::StartKyoku {
+                    bakaze,
+                    dora_marker,
+                    kyoku,
+                    honba,
+                    kyotaku,
+                    oya,
+                    scores,
+                    tehais,
+                } => {
+                    let masked_tehais: Vec<json::Value> = tehais
+                        .iter()
+                        .enumerate()
+                        .map(|(i, hand)| {
+                            if i == seat {
+                                let tiles: Vec<json::Value> = hand
+                                    .iter()
+                                    .map(|t| {
+                                        json::Value::String(
+                                            libriichi_tile_to_rinshan(&t.to_string()).to_owned(),
+                                        )
+                                    })
+                                    .collect();
+                                json::Value::Array(tiles)
+                            } else {
+                                json::Value::Array(
+                                    (0..13)
+                                        .map(|_| json::Value::String("?".to_owned()))
+                                        .collect(),
+                                )
+                            }
+                        })
+                        .collect();
+                    let mut m = json::Map::new();
+                    m.insert("type".into(), "start_kyoku".into());
+                    m.insert(
+                        "bakaze".into(),
+                        json::Value::String(
+                            libriichi_tile_to_rinshan(&bakaze.to_string()).to_owned(),
+                        ),
+                    );
+                    m.insert(
+                        "dora_marker".into(),
+                        json::Value::String(
+                            libriichi_tile_to_rinshan(&dora_marker.to_string()).to_owned(),
+                        ),
+                    );
+                    m.insert("kyoku".into(), json::Value::Number((*kyoku).into()));
+                    m.insert("honba".into(), json::Value::Number((*honba).into()));
+                    m.insert("kyotaku".into(), json::Value::Number((*kyotaku).into()));
+                    m.insert("oya".into(), json::Value::Number((*oya).into()));
+                    m.insert(
+                        "scores".into(),
+                        json::Value::Array(
+                            scores.iter().map(|&s| json::Value::Number(s.into())).collect(),
+                        ),
+                    );
+                    m.insert("tehais".into(), json::Value::Array(masked_tehais));
+                    json::to_string(&json::Value::Object(m)).ok()
+                }
+                _ => {
+                    let mut v = json::to_value(ev).ok()?;
+                    translate_tiles_to_rinshan(&mut v);
+                    json::to_string(&v).ok()
+                }
+            }})();
+            if let Some(s) = json_str {
+                self.logs[index].push(s);
+            }
+        }
+        self.log_cursor[index] = log.len();
     }
 
     /// Build the pending dict for turn_action (it's the player's own turn).
@@ -399,9 +395,15 @@ impl RinshanBatchAgent {
     }
 
     /// Run the Python batch inference for all pending slots.
+    ///
+    /// Protocol: call `react_batch_requests_json(items_json)` where
+    /// `items_json` is a single JSON string encoding a list of
+    /// `[seat, events_json_str, pending_json_str]` triples.
+    /// Python returns a JSON string encoding a list of response dicts.
+    /// This avoids per-event PyDict construction and per-response json.dumps.
     fn evaluate(&mut self, _game_key: &str) -> Result<()> {
         // Collect all slots that have a pending decision.
-        let batch: Vec<(usize, &Vec<json::Value>, &json::Value)> = self
+        let batch: Vec<(usize, &Vec<String>, &json::Value)> = self
             .pending
             .iter()
             .enumerate()
@@ -412,50 +414,71 @@ impl RinshanBatchAgent {
             return Ok(());
         }
 
-        let raw_responses: Vec<json::Value> = Python::with_gil(|py| {
-            // Build Python list of (seat, events_list, pending_dict) tuples.
-            let requests = PyList::empty(py);
-            for (i, events, pending) in &batch {
-                let seat = self.player_ids[*i] as i64;
-                // Convert events to Python list of dicts.
-                let py_events = PyList::empty(py);
-                for ev in *events {
-                    let d = json_value_to_py_dict(py, ev)?;
-                    py_events.append(d)?;
-                }
-                let py_pending = json_value_to_py_dict(py, pending)?;
-                let tup = PyTuple::new(py, [
-                    seat.into_pyobject(py)?.into_any().unbind(),
-                    py_events.into_any().unbind(),
-                    py_pending.into_any().unbind(),
-                ])?;
-                requests.append(tup)?;
+        // Serialise the entire batch as a single JSON string:
+        // [[seat, "[...events json...]", "{...pending json...}"], ...]
+        // Using pre-serialised event strings avoids re-serialising each event.
+        let batch_json: String = {
+            let mut arr = String::with_capacity(4096);
+            arr.push('[');
+            for (k, (i, events, pending)) in batch.iter().enumerate() {
+                if k > 0 { arr.push(','); }
+                let seat = self.player_ids[*i] as u8;
+                let events_json = format!("[{}]", events.join(","));
+                let pending_json = json::to_string(pending).unwrap_or_else(|_| "{}".to_owned());
+                // Encode events_json and pending_json as JSON strings (escaped).
+                let events_json_escaped = json::to_string(&events_json).unwrap();
+                let pending_json_escaped = json::to_string(&pending_json).unwrap();
+                arr.push_str(&format!(
+                    "[{},{},{}]",
+                    seat, events_json_escaped, pending_json_escaped
+                ));
             }
+            arr.push(']');
+            arr
+        };
 
+        let raw_responses: Vec<json::Value> = Python::with_gil(|py| {
+            // Try the fast JSON-string path first.
             let result = self
                 .engine
                 .bind_borrowed(py)
-                .call_method1(intern!(py, "react_batch_requests"), (requests,))
-                .context("react_batch_requests call failed")?;
+                .call_method1(intern!(py, "react_batch_requests_json"), (&batch_json,));
 
-            // Convert Python list of dicts back to serde_json::Value.
-            let py_list = result.downcast::<PyList>().map_err(|e| anyhow::anyhow!("expected list: {:?}", e))?;
-            let mut out = Vec::with_capacity(py_list.len());
-            for item in py_list.iter() {
-                let _s: String = item
-                    .call_method0(intern!(py, "__repr__"))
-                    .ok()
-                    .and_then(|r| r.extract().ok())
-                    .unwrap_or_else(|| "{}".to_owned());
-                // Use the Python json module to get proper JSON from the dict.
-                let json_mod = py.import("json")?;
-                let json_str: String = json_mod
-                    .call_method1(intern!(py, "dumps"), (item,))?
-                    .extract()?;
-                let v: json::Value = json::from_str(&json_str)
-                    .unwrap_or(json::Value::Object(json::Map::new()));
-                out.push(v);
-            }
+            let responses_json: String = match result {
+                Ok(r) => r.extract::<String>()?,
+                Err(_) => {
+                    // Fallback: build PyDict-based request list and call old method.
+                    let requests = PyList::empty(py);
+                    for (i, events, pending) in &batch {
+                        let seat = self.player_ids[*i] as i64;
+                        let py_events = PyList::empty(py);
+                        for ev_str in *events {
+                            let json_mod = py.import("json")?;
+                            let d = json_mod.call_method1(intern!(py, "loads"), (ev_str.as_str(),))?;
+                            py_events.append(d)?;
+                        }
+                        let py_pending = json_value_to_py_dict(py, pending)?;
+                        let tup = PyTuple::new(py, [
+                            seat.into_pyobject(py)?.into_any().unbind(),
+                            py_events.into_any().unbind(),
+                            py_pending.into_any().unbind(),
+                        ])?;
+                        requests.append(tup)?;
+                    }
+                    let res = self
+                        .engine
+                        .bind_borrowed(py)
+                        .call_method1(intern!(py, "react_batch_requests"), (requests,))
+                        .context("react_batch_requests call failed")?;
+                    let json_mod = py.import("json")?;
+                    json_mod
+                        .call_method1(intern!(py, "dumps"), (res,))?
+                        .extract::<String>()?
+                }
+            };
+
+            let out: Vec<json::Value> = json::from_str(&responses_json)
+                .unwrap_or_default();
             Ok::<_, anyhow::Error>(out)
         })?;
 
@@ -551,7 +574,9 @@ impl BatchAgent for RinshanBatchAgent {
 
         // game_key: index encodes which game-slot this player belongs to,
         // making it unique across concurrent games in the same batch.
-        let game_key = format!("rust:i{}:{}:{}", index, state.kyoku(), state.honba());
+        // game_key: stable per-slot identifier (no kyoku/honba) so that the
+        // Python-side state cache survives across kyoku transitions.
+        let game_key = format!("rust:g{}:i{}", self.game_counter, index);
 
         let cans = state.last_cans();
         let pending = if cans.can_discard
@@ -603,8 +628,9 @@ impl BatchAgent for RinshanBatchAgent {
         if index == 0 {
             self.game_counter += 1;
         }
-        // Reset per-game state.
+        // Reset per-game state including the incremental cursor.
         self.logs[index].clear();
+        self.log_cursor[index] = 0;
         self.pending[index] = None;
         self.responses[index] = None;
         Ok(())
