@@ -85,14 +85,9 @@ def _single_forced_response(
                 "target": pending.get("discarder", seat),
                 "pai": pending.get("tile", "1z"),
             }
-        if tok == RIICHI_TOKEN and state is not None:
-            tile, tsumogiri = _pick_riichi_discard(state, seat, None, candidates)
-            return {
-                "type": "reach",
-                "actor": seat,
-                "pai": tile.to_mjai(),
-                "tsumogiri": tsumogiri,
-            }
+        if tok == RIICHI_TOKEN:
+            # 同 _token_to_mjai：只返回 reach，不带 pai，让 Rust 再来问 dahai
+            return {"type": "reach", "actor": seat}
         if DISCARD_OFFSET <= tok < DISCARD_OFFSET + 37 and state is not None:
             idx = tok - DISCARD_OFFSET
             tile = Tile(idx) if idx < 34 else {34: Tile(4, True), 35: Tile(13, True), 36: Tile(22, True)}[idx]
@@ -944,14 +939,12 @@ def _token_to_mjai(token: int, seat: int, state, pending: dict,
             return {"type": "dahai", "actor": seat,
                     "pai": tile.to_mjai(), "tsumogiri": True}
         return {"type": "pass", "actor": seat}
-    # 立直（后续跟随打牌）
+    # 立直宣告：只返回 reach{actor}，不附带 pai。
+    # Rust mjai 协议中 Reach 事件不含弃牌，Rust 接到 reach 后
+    # 会再调用一次 set_scene/get_reaction 来问 dahai（pending 里
+    # 会带 forced_type=dahai + forced_pai），Python 走 quick path 返回。
     if token == RIICHI_TOKEN:
-        # 枚举立直后所有合法弃牌，用模型 Q 值选最优
-        tile, tsumogiri = _pick_riichi_discard(state, seat, q_values, candidates)
-        return {
-            "type": "reach", "actor": seat,
-            "pai": tile.to_mjai(), "tsumogiri": tsumogiri,
-        }
+        return {"type": "reach", "actor": seat}
     # 打牌
     if DISCARD_OFFSET <= token < DISCARD_OFFSET + 37:
         idx = token - DISCARD_OFFSET
