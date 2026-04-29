@@ -171,7 +171,14 @@ class RinshanAgent(BaseAgent):
 
     内部维护与 MjaiSimulator 相同的 GameState，把当前局面编码为模型输入，
     调用 model.react() 得到动作 token，再解码为 mjai 格式 dict 输出。
+
+    libriichi 接口属性（供 RinshanBatchAgent Rust 适配器识别）：
+        engine_type = "rinshan"
+        name        = agent 名称
     """
+
+    # libriichi py_agent 识别标志
+    engine_type: str = "rinshan"
 
     def __init__(
         self,
