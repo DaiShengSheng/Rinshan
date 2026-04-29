@@ -636,7 +636,12 @@ impl BatchAgent for RinshanBatchAgent {
         Ok(())
     }
 
-    fn end_kyoku(&mut self, _index: usize) -> Result<()> {
+    fn end_kyoku(&mut self, index: usize) -> Result<()> {
+        // board.take_log() clears the Rust-side log at kyoku end, so the
+        // next kyoku's log slice starts from 0 again. Reset the cursor here
+        // so push_event doesn't try to slice into a shorter-than-cursor log.
+        self.log_cursor[index] = 0;
+        self.logs[index].clear();
         Ok(())
     }
 
