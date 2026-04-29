@@ -264,6 +264,12 @@ class RinshanAgent(BaseAgent):
         temperature: float = 0.8,
         top_p: float = 0.9,
         greedy: bool = False,
+        infer_dtype: str = "auto",
+        # infer_dtype 控制推理时的 autocast 精度：
+        #   "auto"    → cuda 设备自动选 bf16（与训练一致，动态范围安全），cpu 不开 autocast
+        #   "bf16"    → 强制 bfloat16（推荐，与训练 dtype 一致）
+        #   "fp16"    → 强制 float16（3060 等老卡 bf16 慢时可用，速度相当但动态范围窄）
+        #   "fp32"    → 关闭 autocast，全程 fp32（最慢，用于调试精度问题）
     ):
         super().__init__(name)
         self.model = model
@@ -271,6 +277,7 @@ class RinshanAgent(BaseAgent):
         self.temperature = temperature
         self.top_p = top_p
         self.greedy = greedy
+        self.infer_dtype = infer_dtype
         # 仅在显式打开时启用 quick-eval；默认关闭，避免行为漂移。
         self.enable_quick_eval = False
 
@@ -299,6 +306,34 @@ class RinshanAgent(BaseAgent):
                            if isinstance(k, tuple) and k[0].startswith(prefix)]
             for k in keys_to_del:
                 del self._state_cache[k]
+
+    def _make_autocast_ctx(self):
+        """
+        根据 infer_dtype 构建推理用的 autocast 上下文。
+
+        infer_dtype 选项：
+          "auto"  → cuda 用 bf16（与训练一致，动态范围安全），cpu 不开 autocast
+          "bf16"  → 强制 bfloat16（推荐，与 stage3/4 训练 dtype 一致）
+          "fp16"  → 强制 float16（3060 等老卡 bf16 慢时可用，动态范围较窄）
+          "fp32"  → 关闭 autocast（最慢，调试精度问题用）
+        """
+        if self.device.type != "cuda":
+            # CPU 不用 autocast
+            return torch.autocast(device_type="cpu", enabled=False)
+
+        dtype_map = {
+            "bf16": torch.bfloat16,
+            "fp16": torch.float16,
+        }
+        if self.infer_dtype == "fp32":
+            return torch.autocast(device_type="cuda", enabled=False)
+        if self.infer_dtype in dtype_map:
+            return torch.autocast(device_type="cuda", dtype=dtype_map[self.infer_dtype])
+        # "auto"：检测 bf16 支持
+        if torch.cuda.is_bf16_supported():
+            return torch.autocast(device_type="cuda", dtype=torch.bfloat16)
+        # 老卡不支持 bf16 则退回 fp16
+        return torch.autocast(device_type="cuda", dtype=torch.float16)
 
     def _get_cached_state(self, seat: int, player_events: list[dict], pending: dict):
         game_key = str(pending.get("_game_key", "default"))
@@ -406,10 +441,7 @@ class RinshanAgent(BaseAgent):
             b_pad_mask = encoded["belief_pad_mask"].to(self.device, non_blocking=True)
 
             self.model.eval()
-            # fp16 autocast：推理时自动降精度，速度提升 2-3x，结果无感知差异
-            _use_amp = (self.device.type == "cuda")
-            _amp_ctx = (torch.autocast(device_type="cuda", dtype=torch.float16)
-                        if _use_amp else torch.autocast(device_type="cpu", enabled=False))
+            _amp_ctx = self._make_autocast_ctx()
             with torch.inference_mode(), _amp_ctx:
                 action_idx, q_values = self.model.react(
                     tokens, cand_mask, pad_mask,
