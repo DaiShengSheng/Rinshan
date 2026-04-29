@@ -42,11 +42,57 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
 
+import torch
+
+from rinshan.model.grp import GRP, RewardCalculator
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("convert_grp_rewards_to_v2")
 
 
 RoundKey = tuple[str, int, int, int, int]
+
+
+def _build_grp_frames(rows: list[dict[str, Any]], player_id: int) -> torch.Tensor:
+    seen_rounds: set[tuple[int, int, int]] = set()
+    frames: list[list[float]] = []
+    for d in rows:
+        rw = int(d.get("round_wind", 0))
+        rn = int(d.get("round_num", 0))
+        hb = int(d.get("honba", 0))
+        if (rw, rn, hb) in seen_rounds:
+            continue
+        seen_rounds.add((rw, rn, hb))
+        scores = list(d.get("scores", [25000] * 4))
+        abs_scores = scores[4 - player_id:] + scores[:4 - player_id]
+        frames.append([
+            float(rw * 4 + rn - 1),
+            float(hb),
+            float(d.get("kyotaku", 0)),
+            abs_scores[0] / 1e4,
+            abs_scores[1] / 1e4,
+            abs_scores[2] / 1e4,
+            abs_scores[3] / 1e4,
+        ])
+    if not frames:
+        return torch.zeros((0, 7), dtype=torch.float64)
+    return torch.tensor(frames, dtype=torch.float64)
+
+
+def _compute_transition_hand_rewards(lines: list[dict[str, Any]], device: str, grp_ckpt: str | None, platform: str) -> list[float]:
+    # 完全体 GRP 2.0：如果提供了 GRP 模型，则对每条 action 估计“当前状态到下一决策状态”
+    # 的 game value 变化；hand reward 用 round_delta_score 作为局内分支信号。
+    # 当前阶段为了保证稳健和成本可控，这里只精细重标跨局末动作，局内中间动作仍 hand_reward=0。
+    hand_rewards = [0.0 for _ in lines]
+    grouped_indices: dict[RoundKey, list[int]] = defaultdict(list)
+    for idx, d in enumerate(lines):
+        grouped_indices[_round_key(d)].append(idx)
+    for _, idxs in grouped_indices.items():
+        if not idxs:
+            continue
+        last_i = idxs[-1]
+        hand_rewards[last_i] = _safe_float(lines[last_i].get("round_delta_score", 0.0)) / 1000.0
+    return hand_rewards
 
 
 def _safe_float(value: Any, default: float = 0.0) -> float:
@@ -117,10 +163,10 @@ def _convert_lines(lines: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], d
     return lines, stats
 
 
-def _process_file(args_tuple: tuple[str, str, bool]) -> dict[str, Any]:
-    in_path_s, out_path_s, keep_invalid_lines = args_tuple
+def _process_file(args_tuple: tuple[str, str, bool, str | None, str]) -> dict[str, Any]:
+    in_path_s, out_path_s, keep_invalid_lines, grp_ckpt, platform = args_tuple
     try:
-        return _process_file_impl(in_path_s, out_path_s, keep_invalid_lines)
+        return _process_file_impl(in_path_s, out_path_s, keep_invalid_lines, grp_ckpt, platform)
     except BaseException as e:
         # 尽量把 worker 内异常转成普通失败结果，而不是直接打爆整个进程池。
         return {
@@ -137,7 +183,7 @@ def _process_file(args_tuple: tuple[str, str, bool]) -> dict[str, Any]:
         }
 
 
-def _process_file_impl(in_path_s: str, out_path_s: str, keep_invalid_lines: bool) -> dict[str, Any]:
+def _process_file_impl(in_path_s: str, out_path_s: str, keep_invalid_lines: bool, grp_ckpt: str | None, platform: str) -> dict[str, Any]:
     in_path = Path(in_path_s)
     out_path = Path(out_path_s)
 
@@ -179,6 +225,9 @@ def _process_file_impl(in_path_s: str, out_path_s: str, keep_invalid_lines: bool
         }
 
     converted, stats = _convert_lines(parsed_lines)
+    hand_rewards = _compute_transition_hand_rewards(converted, device="cpu", grp_ckpt=grp_ckpt, platform=platform)
+    for d, hand_r in zip(converted, hand_rewards):
+        d["hand_reward"] = float(hand_r)
 
     if keep_invalid_lines:
         for pos, d in zip(parsed_positions, converted):
@@ -212,7 +261,7 @@ def _build_file_list(input_dir: Path, sample_files: int | None, seed: int, max_f
     return files
 
 
-def _iter_completed_futures(pool: ProcessPoolExecutor, tasks: list[tuple[str, str, bool]], submit_batch: int):
+def _iter_completed_futures(pool: ProcessPoolExecutor, tasks: list[tuple[str, str, bool, str | None, str]], submit_batch: int):
     """限制 in-flight future 数量，避免一次性把大量大文件任务全压进进程池。"""
     pending = {}
     task_iter = iter(tasks)
@@ -249,6 +298,8 @@ def main() -> None:
         action="store_true",
         help="保留无法解析的原始行（原样抄到输出），默认跳过非法 JSON 行",
     )
+    parser.add_argument("--grp-ckpt", type=str, default=None, help="可选：GRP checkpoint 路径（为未来更细粒度 relabel 预留）")
+    parser.add_argument("--platform", choices=["tenhou", "jantama"], default="tenhou", help="GRP reward 平台类型")
     parser.add_argument(
         "--start-method",
         choices=["auto", "fork", "spawn", "forkserver"],
@@ -284,14 +335,14 @@ def main() -> None:
         logger.info("No .jsonl files found. Nothing to do.")
         return
 
-    tasks: list[tuple[str, str, bool]] = []
+    tasks: list[tuple[str, str, bool, str | None, str]] = []
     skipped = 0
     for p in files:
         out_path = output_dir / p.relative_to(input_dir)
         if out_path.exists() and not args.overwrite:
             skipped += 1
             continue
-        tasks.append((str(p), str(out_path), bool(args.keep_invalid_lines)))
+        tasks.append((str(p), str(out_path), bool(args.keep_invalid_lines), args.grp_ckpt, args.platform))
 
     submit_batch = args.submit_batch if args.submit_batch is not None else max(1, args.workers * 2)
     if args.start_method == "auto":

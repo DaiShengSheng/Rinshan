@@ -46,9 +46,12 @@ from __future__ import annotations
 import argparse
 import gzip
 import json
+import math
 import sys
 from datetime import datetime
 from pathlib import Path
+
+import torch
 
 # 将项目根目录加入 path
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -234,91 +237,88 @@ def _save_rust_results(results, output_dir: str, compress: bool) -> None:
     print(f"[+] 已保存 {len(results)} 局对局 → {out_path}")
 
 
-def run_rust_versus(args) -> None:
-    """Rust TwoVsTwo 双模型对战（wave 循环，支持 --parallel_games）"""
+def evaluate_versus_strength(args) -> dict:
+    """返回对战汇总指标，供 Stage3 arena gate 使用。"""
     import time
     from rinshan.self_play.agent import RinshanAgent
     from libriichi.arena import TwoVsTwo
 
-    # TwoVsTwo 每 round 跑 2 局（互换座位），n_games 和 wave 都必须是偶数
-    if args.n_games % 2 != 0:
-        args.n_games += 1
-        print(f"[!] n_games 调整为偶数 → {args.n_games}")
-
-    wave = args.parallel_games
+    n_games = int(args.n_games)
+    if n_games % 2 != 0:
+        n_games += 1
+    wave = int(args.parallel_games)
     if wave % 2 != 0:
         wave += 1
-        print(f"[!] parallel_games 调整为偶数 → {wave}")
 
-    preset2  = args.ckpt2_preset or args.model_preset
-    model_ch = load_model(args.ckpt,  args.model_preset, args.device)
-    model_bl = load_model(args.ckpt2, preset2,            args.device)
-
+    preset2 = args.ckpt2_preset or args.model_preset
+    model_ch = load_model(args.ckpt, args.model_preset, args.device)
+    model_bl = load_model(args.ckpt2, preset2, args.device)
     agent_ch = RinshanAgent(model_ch, name="ch", device=args.device,
                             temperature=args.temperature, top_p=args.top_p, greedy=args.greedy)
     agent_bl = RinshanAgent(model_bl, name="bl", device=args.device,
                             temperature=args.temperature, top_p=args.top_p, greedy=args.greedy)
 
-    arena       = TwoVsTwo(disable_progress_bar=args.quiet,
-                          log_dir=args.log_dir)
+    arena = TwoVsTwo(disable_progress_bar=args.quiet, log_dir=args.log_dir)
     all_results = []
-    generated   = 0
-    t0          = time.time()
-
-    while generated < args.n_games:
-        this_wave = min(wave, args.n_games - generated)
-        # py_vs_py 第 4 参数是 rounds（每 round = 2 局）
-        results = arena.py_vs_py(agent_ch, agent_bl,
-                                 (args.seed + generated, 0),
-                                 this_wave // 2)
+    generated = 0
+    t0 = time.time()
+    while generated < n_games:
+        this_wave = min(wave, n_games - generated)
+        results = arena.py_vs_py(agent_ch, agent_bl, (args.seed + generated, 0), this_wave // 2)
         all_results.extend(results)
         generated += this_wave
-        if not args.quiet:
-            elapsed_so_far = time.time() - t0
-            speed = generated / elapsed_so_far
-            print(f"\r[Arena] {generated}/{args.n_games} games  "
-                  f"({speed:.2f} 局/s)", end="", flush=True)
-
-    if not args.quiet:
-        print()
 
     elapsed = time.time() - t0
-
-    ch_ranks, bl_ranks   = [], []
+    ch_ranks, bl_ranks = [], []
     ch_scores, bl_scores = [], []
     for r in all_results:
-        rr    = list(r.rankings())
-        sc    = list(r.scores)
+        rr = list(r.rankings())
+        sc = list(r.scores)
         names = list(r.names)
         for seat in range(4):
             if names[seat] == "ch":
-                ch_ranks.append(rr[seat]);  ch_scores.append(sc[seat])
+                ch_ranks.append(rr[seat])
+                ch_scores.append(sc[seat])
             elif names[seat] == "bl":
-                bl_ranks.append(rr[seat]);  bl_scores.append(sc[seat])
+                bl_ranks.append(rr[seat])
+                bl_scores.append(sc[seat])
 
-    ch_avg   = sum(x + 1 for x in ch_ranks)  / max(len(ch_ranks),  1)
-    bl_avg   = sum(x + 1 for x in bl_ranks)  / max(len(bl_ranks),  1)
-    ch_first = sum(1 for x in ch_ranks  if x == 0) / max(len(ch_ranks),  1) * 100
-    bl_first = sum(1 for x in bl_ranks  if x == 0) / max(len(bl_ranks),  1) * 100
+    ch_avg = sum(x + 1 for x in ch_ranks) / max(len(ch_ranks), 1)
+    bl_avg = sum(x + 1 for x in bl_ranks) / max(len(bl_ranks), 1)
+    ch_first = sum(1 for x in ch_ranks if x == 0) / max(len(ch_ranks), 1)
+    bl_first = sum(1 for x in bl_ranks if x == 0) / max(len(bl_ranks), 1)
     ch_score = sum(ch_scores) / max(len(ch_scores), 1)
     bl_score = sum(bl_scores) / max(len(bl_scores), 1)
-    delta    = ch_avg - bl_avg
-    verdict  = ("↑ Challenger 胜" if delta < -0.05
+    delta = ch_avg - bl_avg
+    se = (torch.tensor([(x + 1) for x in ch_ranks], dtype=torch.float32).std(unbiased=False).item() / math.sqrt(max(len(ch_ranks), 1))) if ch_ranks else 0.0
+    return {
+        "games": len(all_results),
+        "elapsed": elapsed,
+        "challenger_avg_rank": ch_avg,
+        "baseline_avg_rank": bl_avg,
+        "challenger_first_rate": ch_first,
+        "baseline_first_rate": bl_first,
+        "challenger_avg_score": ch_score,
+        "baseline_avg_score": bl_score,
+        "delta_rank": delta,
+        "challenger_rank_se": se,
+    }
+
+
+def run_rust_versus(args) -> None:
+    """Rust TwoVsTwo 双模型对战（wave 循环，支持 --parallel_games）"""
+    summary = evaluate_versus_strength(args)
+    delta = summary["delta_rank"]
+    verdict = ("↑ Challenger 胜" if delta < -0.05
                 else "↓ Baseline 胜" if delta > 0.05
                 else "→ 持平")
-
     print(f"\n{'='*58}")
-    print(f"对战完成  {len(all_results)} 局 | 用时 {elapsed:.1f}s | "
-          f"速度 {len(all_results)/elapsed:.2f} 局/s")
+    print(f"对战完成  {summary['games']} 局 | 用时 {summary['elapsed']:.1f}s | 速度 {summary['games']/summary['elapsed']:.2f} 局/s")
     print(f"{'─'*58}")
-    print(f"Challenger  平均顺位 {ch_avg:.3f}  "
-          f"一位率 {ch_first:.1f}%  平均得分 {ch_score:.0f}")
-    print(f"Baseline    平均顺位 {bl_avg:.3f}  "
-          f"一位率 {bl_first:.1f}%  平均得分 {bl_score:.0f}")
+    print(f"Challenger  平均顺位 {summary['challenger_avg_rank']:.3f}  一位率 {summary['challenger_first_rate']*100:.1f}%  平均得分 {summary['challenger_avg_score']:.0f}")
+    print(f"Baseline    平均顺位 {summary['baseline_avg_rank']:.3f}  一位率 {summary['baseline_first_rate']*100:.1f}%  平均得分 {summary['baseline_avg_score']:.0f}")
     print(f"顺位差 Δ={delta:+.3f}  {verdict}")
     print("="*58)
-
-    _save_rust_results(all_results, args.output, args.compress)
 
 
 def run_rust_selfplay(args) -> None:

@@ -21,6 +21,7 @@ Usage:
 from __future__ import annotations
 
 import logging
+import subprocess
 import sys
 from pathlib import Path
 
@@ -32,6 +33,67 @@ sys.path.insert(0, str(Path(__file__).parents[1]))
 from rinshan.utils.config import load_config
 from rinshan.data         import MjaiDataset, collate_fn
 from rinshan.training     import Trainer, TrainerConfig
+
+
+def _arena_gate(cfg: dict, ckpt_path: Path, step: int, save_dir: Path) -> tuple[bool, dict]:
+    gate_games = int(cfg.get("arena_gate_games", 0))
+    baseline_ckpt = cfg.get("arena_gate_baseline_ckpt", cfg.get("stage2_ckpt", ""))
+    if gate_games <= 0 or not baseline_ckpt:
+        return False, {}
+
+    cmd = [
+        sys.executable,
+        str(Path(__file__).with_name("run_self_play.py")),
+        "--mode", "versus",
+        "--ckpt", str(ckpt_path),
+        "--ckpt2", str(baseline_ckpt),
+        "--model_preset", str(cfg.get("model_preset", "base")),
+        "--n_games", str(gate_games),
+        "--parallel_games", str(cfg.get("arena_parallel_games", gate_games)),
+        "--device", str(cfg.get("arena_device", cfg.get("device", "cuda"))),
+        "--seed", str(int(cfg.get("arena_seed", 1234)) + int(step)),
+        "--greedy",
+        "--quiet",
+    ]
+    ckpt2_preset = cfg.get("arena_gate_baseline_preset")
+    if ckpt2_preset:
+        cmd.extend(["--ckpt2_preset", str(ckpt2_preset)])
+
+    logger.info("Running arena gate: %s", " ".join(cmd))
+    proc = subprocess.run(cmd, cwd=str(Path(__file__).parents[1]), capture_output=True, text=True)
+    if proc.returncode != 0:
+        logger.warning("Arena gate failed (returncode=%s): %s", proc.returncode, proc.stderr.strip())
+        return False, {"error": proc.stderr.strip(), "returncode": proc.returncode}
+
+    # 直接在 stdout 中解析最后打印的 delta 行
+    metrics = {}
+    for line in proc.stdout.splitlines():
+        line = line.strip()
+        if "顺位差 Δ=" in line:
+            try:
+                delta_str = line.split("Δ=")[-1].split()[0]
+                metrics["delta_rank"] = float(delta_str)
+            except Exception:
+                pass
+        elif "Challenger  平均顺位" in line:
+            parts = line.replace("Challenger  平均顺位", "").split()
+            if parts:
+                try:
+                    metrics["challenger_avg_rank"] = float(parts[0])
+                except Exception:
+                    pass
+    if "delta_rank" not in metrics:
+        logger.warning("Arena gate parse failed; stdout tail:\n%s", "\n".join(proc.stdout.splitlines()[-20:]))
+        return False, {"error": "parse_failed"}
+
+    threshold = float(cfg.get("arena_gate_rank_delta_threshold", 0.0))
+    passed = metrics["delta_rank"] <= threshold
+    metrics["passed"] = passed
+    metrics["threshold"] = threshold
+    gate_log = save_dir / f"arena_gate_step{step}.log"
+    gate_log.write_text(proc.stdout + "\n\nSTDERR:\n" + proc.stderr, encoding="utf-8")
+    logger.info("Arena gate step=%s delta_rank=%.4f threshold=%.4f passed=%s", step, metrics["delta_rank"], threshold, passed)
+    return passed, metrics
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("train_stage3")
@@ -150,6 +212,7 @@ def main():
     total_steps = int(cfg.get("total_steps", 100_000))
     val_every   = int(cfg.get("val_every", 2000))
     best_val_loss = float("inf")
+    best_gate_delta = float("inf")
 
     # 检查 grp_reward 是否存在
     # 取第一个样本验证
@@ -194,6 +257,20 @@ def main():
             logger.info(f"[val step={step}] val_loss={val_loss:.4f}")
             if val_loss < best_val_loss:
                 best_val_loss = val_loss
+                trainer.save(ckpt_dir / "best_val.pt")
+
+            if cfg.get("arena_gate_games", 0):
+                gate_ckpt = ckpt_dir / f"gate_eval_step{step}.pt"
+                trainer.save(gate_ckpt)
+                passed, gate_metrics = _arena_gate(cfg, gate_ckpt, step, ckpt_dir)
+                if passed and gate_metrics.get("delta_rank", float("inf")) < best_gate_delta:
+                    best_gate_delta = gate_metrics["delta_rank"]
+                    trainer.save(ckpt_dir / "best.pt")
+                try:
+                    gate_ckpt.unlink()
+                except FileNotFoundError:
+                    pass
+            elif val_loss < best_val_loss:
                 trainer.save(ckpt_dir / "best.pt")
 
     logger.info("Stage 3 complete")

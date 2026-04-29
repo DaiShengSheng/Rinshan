@@ -30,6 +30,10 @@ hand_expectile: 0.70
 game_reward_weight: 1.0
 hand_reward_weight: 1.0
 target_update_every: 100
+arena_gate_games: 200
+arena_parallel_games: 64
+arena_gate_rank_delta_threshold: 0.0
+arena_gate_baseline_ckpt: checkpoints/stage2_best.pt
 
 dtype: bfloat16
 amp: true
