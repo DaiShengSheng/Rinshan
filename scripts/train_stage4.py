@@ -24,8 +24,11 @@ Config 关键字段（见 configs/stage4_self_play.yaml）：
 from __future__ import annotations
 
 import copy
+import json as _json
 import logging
+import queue
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -129,76 +132,137 @@ def _records_from_rust_results(results) -> list[GameRecord]:
     """把 libriichi.arena.GameResult 转成现有 OnlineBuffer 可消费的 GameRecord。"""
     records: list[GameRecord] = []
     for i, r in enumerate(results):
-        text = r.dump_json_log()
-        lines = [line for line in text.splitlines() if line.strip()]
-        events = [__import__("json").loads(line) for line in lines]
         kyoku_logs: list[list[dict]] = []
         current: list[dict] = []
-        for ev in events:
-            etype = ev.get("type")
-            if etype == "start_game":
+        for line in r.dump_json_log().splitlines():
+            if not line.strip():
                 continue
-            if etype == "end_game":
-                break
+            ev = _json.loads(line)
+            etype = ev.get("type")
+            if etype in ("start_game", "end_game"):
+                continue
             current.append(ev)
             if etype == "end_kyoku":
                 kyoku_logs.append(current)
                 current = []
-
-        ranks = list(r.rankings())
         records.append(GameRecord(
             game_id=f"rust_sp_{r.seed[0]}_{i:06d}",
             seed=tuple(r.seed),
             agent_names=list(r.names),
             final_scores=list(r.scores),
-            ranks=ranks,
+            ranks=list(r.rankings()),
             kyoku_logs=kyoku_logs,
         ))
     return records
 
 
-def _run_rust_self_play(current_model: RinshanModel, device: torch.device, sp_cfg: dict, iteration: int):
+def _make_agent(model: RinshanModel, name: str, device: torch.device, sp_cfg: dict) -> RinshanAgent:
+    return RinshanAgent(
+        model=model,
+        name=name,
+        device=str(device),
+        temperature=float(sp_cfg.get("temperature", 0.8)),
+        top_p=float(sp_cfg.get("top_p", 0.9)),
+        greedy=bool(sp_cfg.get("greedy", False)),
+    )
+
+
+def _run_rust_self_play(
+    current_model: RinshanModel,
+    league: "League",
+    device: torch.device,
+    sp_cfg: dict,
+    iteration: int,
+) -> list[GameRecord]:
     """
-    Rust SelfPlay 后端：四席同模自对弈。
+    Rust 自对弈后端，支持 League 对手。
 
-    关键参数：
-      - n_games_per_iter: 本轮总共要生成多少局
-      - parallel_games:   单个 wave 同时并发多少局（决定 GPU batch 大小）
+    - 若 League 有历史模型：用 TwoVsTwo（当前 2 席 vs League 采样 2 席）
+    - 若 League 为空：用 SelfPlay（四席同模）
 
-    对吞吐量而言，parallel_games 比总局数更关键：
-    更大的并发会把同一时刻的待决策状态聚合成更大的 batch，显著提升 GPU 利用率。
+    关键参数（来自 sp_cfg）：
+      n_games_per_iter  本轮总局数
+      parallel_games    单 wave 并发局数（决定 GPU batch 大小，越大 GPU 利用率越高）
     """
-    from libriichi.arena import SelfPlay
-
-    temp = float(sp_cfg.get("temperature", 0.8))
-    top_p = float(sp_cfg.get("top_p", 0.9))
-    greedy = bool(sp_cfg.get("greedy", False))
-    n_games = int(sp_cfg.get("n_games_per_iter", 32))
+    n_games      = int(sp_cfg.get("n_games_per_iter", 32))
     parallel_games = int(sp_cfg.get("parallel_games", n_games))
     parallel_games = max(1, min(parallel_games, n_games))
 
-    agent = RinshanAgent(
-        model=current_model,
-        name="current",
-        device=str(device),
-        temperature=temp,
-        top_p=top_p,
-        greedy=greedy,
-    )
-    arena = SelfPlay(disable_progress_bar=True)
+    opp_sd = league.sample_state_dict()
 
-    all_records: list[GameRecord] = []
-    generated = 0
-    wave = 0
-    while generated < n_games:
-        wave_games = min(parallel_games, n_games - generated)
-        seed_start = (iteration * 100000 + generated, 0)
-        results = arena.py_self_play(agent, seed_start, wave_games)
-        all_records.extend(_records_from_rust_results(results))
-        generated += wave_games
-        wave += 1
+    if opp_sd is not None:
+        # ── TwoVsTwo: 当前模型 2 席 vs League 历史对手 2 席 ──────────────
+        from libriichi.arena import TwoVsTwo
 
-    return all_records
+        if n_games % 2 != 0:
+            n_games += 1
+        if parallel_games % 2 != 0:
+            parallel_games += 1
+
+        preset  = sp_cfg.get("model_preset", "base")
+        cfg_dict = MODEL_CONFIGS.get(preset, MODEL_CONFIGS["base"])
+        opp_model = RinshanModel(TransformerConfig(**cfg_dict), use_belief=True, use_aux=False)
+        opp_model.load_state_dict(opp_sd, strict=False)
+        opp_model.to("cpu").eval()
+
+        agent_cur = _make_agent(current_model, "current", device, sp_cfg)
+        agent_opp = _make_agent(opp_model,     "league",  torch.device("cpu"), sp_cfg)
+
+        arena = TwoVsTwo(disable_progress_bar=True)
+        all_results = []
+        generated   = 0
+        while generated < n_games:
+            wave = min(parallel_games, n_games - generated)
+            results = arena.py_vs_py(
+                agent_cur, agent_opp,
+                (iteration * 100000 + generated, 0),
+                wave // 2,
+            )
+            all_results.extend(results)
+            generated += wave
+    else:
+        # ── SelfPlay: League 为空，四席同模 ──────────────────────────────
+        from libriichi.arena import SelfPlay
+
+        agent = _make_agent(current_model, "current", device, sp_cfg)
+        arena = SelfPlay(disable_progress_bar=True)
+        all_results = []
+        generated   = 0
+        while generated < n_games:
+            wave = min(parallel_games, n_games - generated)
+            results = arena.py_self_play(
+                agent,
+                (iteration * 100000 + generated, 0),
+                wave,
+            )
+            all_results.extend(results)
+            generated += wave
+
+    return _records_from_rust_results(all_results)
+
+
+def _async_generate(
+    current_model: RinshanModel,
+    league: "League",
+    device: torch.device,
+    sp_cfg: dict,
+    iteration: int,
+    result_queue: queue.Queue,
+) -> threading.Thread:
+    """
+    在后台线程启动自对弈生成，结果放入 result_queue。
+    主线程可同时进行上一批的训练，实现生成-训练流水线。
+    """
+    def _worker():
+        try:
+            records = _run_rust_self_play(current_model, league, device, sp_cfg, iteration)
+            result_queue.put(("ok", records))
+        except Exception as e:
+            result_queue.put(("err", e))
+
+    t = threading.Thread(target=_worker, daemon=True)
+    t.start()
+    return t
 
 
 # ─────────────────────────────────────────────
@@ -303,43 +367,57 @@ def main():
     total_train_steps = 0
     t_start        = time.time()
 
+    # ── 流水线初始化：提前启动第 1 轮生成 ────────────────────────────
+    use_async = (self_play_backend == "rust_self_play")
+    gen_queue: queue.Queue = queue.Queue(maxsize=1)
+
+    if use_async:
+        _async_generate(current_model, league, device, sp_cfg, 1, gen_queue)
+        logger.info("[pipeline] Prefetching iteration 1 in background...")
+
     for iteration in range(1, n_iters + 1):
         t_iter = time.time()
 
-        # ── 1. 自对弈 ────────────────────────────
-        if self_play_backend == "rust_self_play":
-            records = _run_rust_self_play(current_model, device, sp_cfg, iteration)
-        else:
-            agents = _build_agents(
-                current_model, league, device, sp_cfg
-            )
-            arena = Arena(
-                agents         = agents,
-                n_games        = n_games_per_iter,
-                game_length    = game_length,
-                base_seed      = iteration * 1000,
-                agent_rotation = "round_robin",
-                show_progress  = False,
-            )
-            records = arena.run()
-        total_games += len(records)
+        # ── 1. 取本轮自对弈结果（同时预取下一轮）──────────────────────
+        if use_async:
+            # 等待后台线程完成本轮生成
+            status, payload = gen_queue.get()
+            if status == "err":
+                raise RuntimeError(f"Self-play worker failed: {payload}") from payload
+            records = payload
+            t_gen = time.time() - t_iter
 
+            # 提前启动下一轮生成（与当前轮训练并行）
+            if iteration < n_iters:
+                _async_generate(current_model, league, device, sp_cfg, iteration + 1, gen_queue)
+        else:
+            # 同步路径（fallback）
+            if self_play_backend == "rust_self_play":
+                records = _run_rust_self_play(current_model, league, device, sp_cfg, iteration)
+            else:
+                agents = _build_agents(current_model, league, device, sp_cfg)
+                arena = Arena(
+                    agents         = agents,
+                    n_games        = n_games_per_iter,
+                    game_length    = game_length,
+                    base_seed      = iteration * 1000,
+                    agent_rotation = "round_robin",
+                    show_progress  = False,
+                )
+                records = arena.run()
+            t_gen = time.time() - t_iter
+
+        total_games += len(records)
         n_new = buffer.ingest_records(records)
         total_samples += n_new
 
-        t_gen = time.time() - t_iter
-
-        # ── 2. 训练（等 buffer 预热后才开始）───
+        # ── 2. 训练（等 buffer 预热后才开始）──────────────────────────
         t_train_start = time.time()
         iter_losses: list[float] = []
 
         if buffer.size >= warmup_samples:
             for batch in buffer.iter_batches(batch_size, train_steps):
-                # 在线时关闭 CQL（offline=False）
-                from rinshan.training.losses import iql_loss
-                # 通过 monkey-patch 调整 cql_weight
                 batch["_online_cql_weight"] = online_cql_weight
-
                 loss_dict = trainer.train_step(batch)
                 total_train_steps += 1
                 iter_losses.append(loss_dict["total"])
