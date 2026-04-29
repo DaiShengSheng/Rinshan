@@ -77,7 +77,11 @@ def _single_forced_response(
             return {"type": "pass", "actor": seat}
 
         if tok == TSUMO_AGARI_TOKEN:
-            return {"type": "tsumo", "actor": seat}
+            # libriichi Rust 协议里自摸和/荣和统一用 Hora 事件表示；
+            # Tsumo 事件是“摸牌”而不是“自摸和”。若这里返回 {type: tsumo}
+            # Rust 会把它当成无 pai 的摸牌事件，反序列化失败后变成 Event::None，
+            # 导致手牌不减、后续摸牌变 15 张并在 agari.rs 里 panic。
+            return {"type": "hora", "actor": seat, "target": seat}
         if tok == RON_AGARI_TOKEN:
             return {
                 "type": "hora",
@@ -953,14 +957,15 @@ def _token_to_mjai(token: int, seat: int, state, pending: dict,
 
     # 荣和
     if token == RON_AGARI_TOKEN:
+        # Rust Hora 只需要 actor + target，不接受 pai 字段
         return {
             "type": "hora", "actor": seat,
             "target": pending.get("discarder", seat),
-            "pai": pending.get("tile", "1z"),
         }
     # 自摸和
     if token == TSUMO_AGARI_TOKEN:
-        return {"type": "tsumo", "actor": seat}
+        # libriichi 的自摸和同样使用 Hora(actor==target) 表示。
+        return {"type": "hora", "actor": seat, "target": seat}
     # Pass / 立直中摸切
     if token == PASS_TOKEN:
         # 立直中 PASS = 摸切（打出刚摸到的牌）
@@ -1002,12 +1007,11 @@ def _token_to_mjai(token: int, seat: int, state, pending: dict,
         suit, low_num, form = idx_to_chi_type(chi_idx)
         pai_str = pending.get("tile", "1m")
         pai = Tile.from_mjai(pai_str)
-        # 推算消耗牌
         hand = state.hands[seat]
         consumed = _find_chi_consumed(hand, suit, low_num, form, pai)
         return {
             "type": "chi", "actor": seat,
-            "discarder": pending.get("discarder", 0),
+            "target": pending.get("discarder", 0),  # Rust: target not discarder
             "pai": pai_str,
             "consumed": [t.to_mjai() for t in consumed],
         }
@@ -1019,7 +1023,7 @@ def _token_to_mjai(token: int, seat: int, state, pending: dict,
         consumed = _find_pon_consumed(hand, tile_id)
         return {
             "type": "pon", "actor": seat,
-            "discarder": pending.get("discarder", 0),
+            "target": pending.get("discarder", 0),  # Rust: target not discarder
             "pai": pai_str,
             "consumed": [t.to_mjai() for t in consumed],
         }
@@ -1031,7 +1035,7 @@ def _token_to_mjai(token: int, seat: int, state, pending: dict,
         consumed = _find_daiminkan_consumed(hand, tile_id)
         return {
             "type": "daiminkan", "actor": seat,
-            "discarder": pending.get("discarder", 0),
+            "target": pending.get("discarder", 0),  # Rust: target not discarder
             "pai": pai_str,
             "consumed": [t.to_mjai() for t in consumed],
         }
