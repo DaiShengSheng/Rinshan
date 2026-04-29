@@ -1,11 +1,18 @@
 """
-train_stage3.py — Stage 3: 离线 IQL 强化学习
+train_stage3.py — Stage 3: 离线 IQL 强化学习（GRP 2.0）
 
-在 Stage 1/2 的基础上，用 GRP 奖励信号做离线 RL 精调。
+在 Stage 1/2 的基础上，用 GRP 价值差分信号做离线 RL 精调。
+GRP 2.0 的关键变化：
+  1. 保留 GRP 作为 learned game-value estimator
+  2. 不再把同一局的 grp_reward 广播到局内所有 action
+  3. 只在 GRP game-state 真正变化（进入下一局 / 终局）时，
+     将该局 delta-value 记到最后一个 action 上；其余 action reward=0
+  4. 训练时加入 AWR 风格 BC anchor，防止策略快速偏离 Stage2 基线
+
 需要先跑完：
-  1. train_grp.py      → 得到 GRP 模型
-  2. fill_grp_rewards.py → 为标注数据填入 grp_reward 字段
-  3. train_stage1.py   → 得到 Stage 1 初始化权重
+  1. train_grp.py         → 得到 GRP 模型
+  2. fill_grp_rewards.py  → 为标注数据填入 grp_reward 字段（按局 delta）
+  3. train_stage1.py / train_stage2.py → 得到 Stage 初始化权重
 
 Usage:
     python scripts/train_stage3.py configs/stage3_base.yaml \
@@ -39,6 +46,7 @@ def main():
     logger.info(f"Config: {cfg}")
 
     stage1_ckpt = cfg.get("stage1_ckpt", "")
+    stage2_ckpt = cfg.get("stage2_ckpt", "")
 
     # ── 数据（Stage 3 需要 s,a,r,s' 对）────────
     data_dir = Path(cfg["data_dir"])
@@ -85,6 +93,12 @@ def main():
         target_update_every = int(cfg.get("target_update_every", 100)),
         cql_weight          = float(cfg.get("cql_weight", -1.0)),
         weights_only_save   = bool(cfg.get("weights_only_save", False)),
+        bc_weight           = float(cfg.get("bc_weight", 0.2)),
+        reward_clip         = float(cfg.get("reward_clip", 20.0)),
+        value_clip          = float(cfg.get("value_clip", 50.0)),
+        adv_clip            = float(cfg.get("adv_clip", 20.0)),
+        awr_temperature     = float(cfg.get("awr_temperature", 3.0)),
+        awr_max_weight      = float(cfg.get("awr_max_weight", 20.0)),
     )
     trainer = Trainer(trainer_cfg)
     device  = trainer.device
@@ -112,6 +126,12 @@ def main():
             logger.info(f"Resuming from {src}")
         del peek
         trainer.load(src)
+    elif stage2_ckpt and Path(stage2_ckpt).exists():
+        logger.info(f"Loading Stage 2 weights from {stage2_ckpt}")
+        s2_ckpt = torch.load(stage2_ckpt, map_location=device, weights_only=True)
+        trainer.model.load_state_dict(s2_ckpt["model"], strict=False)
+        trainer.target_model.load_state_dict(s2_ckpt["model"], strict=False)
+        logger.info("Target network initialized with Stage 2 weights (strict=False)")
     elif stage1_ckpt and Path(stage1_ckpt).exists():
         logger.info(f"Loading Stage 1 weights from {stage1_ckpt}")
         s1_ckpt = torch.load(stage1_ckpt, map_location=device, weights_only=True)
@@ -120,7 +140,7 @@ def main():
         trainer.target_model.load_state_dict(s1_ckpt["model"], strict=False)
         logger.info("Target network initialized with Stage 1 weights (strict=False)")
     else:
-        logger.warning("No checkpoint or stage1_ckpt found, training from scratch")
+        logger.warning("No checkpoint or stage1_ckpt/stage2_ckpt found, training from scratch")
 
     ckpt_dir.mkdir(parents=True, exist_ok=True)
     total_steps = int(cfg.get("total_steps", 100_000))
@@ -146,7 +166,7 @@ def main():
                 if abs(avg_r) < 1e-6:
                     logger.warning(
                         "All grp_reward values are ~0. "
-                        "Run fill_grp_rewards.py first for better training signal."
+                        "GRP 2.0 requires grp_reward deltas from fill_grp_rewards.py."
                     )
             _checked = True
 

@@ -59,6 +59,12 @@ class TrainerConfig:
     target_update_every: int = 100  # 每 N 步做一次目标网络 EMA 更新
     cql_weight: float = -1.0        # <0 表示使用 constants 默认值，>=0 则覆盖
     weights_only_save: bool = False  # True = 只存 model/target 权重，跳过 optimizer/scheduler
+    bc_weight: float = 0.0          # Stage3 anchor：AWR/BC 正则权重
+    reward_clip: float = 20.0       # Stage3 GRP 2.0 reward clip
+    value_clip: float = 50.0        # Stage3 value/q clip
+    adv_clip: float = 20.0          # Stage3 advantage clip for AWR
+    awr_temperature: float = 3.0    # Stage3 AWR temperature
+    awr_max_weight: float = 20.0    # Stage3 AWR max sample weight
 
 
 class Trainer:
@@ -262,6 +268,12 @@ class Trainer:
                     reward=reward,
                     done=done,
                     q_target=q_target_val,
+                    bc_weight=self.cfg.bc_weight,
+                    reward_clip=self.cfg.reward_clip,
+                    value_clip=self.cfg.value_clip,
+                    adv_clip=self.cfg.adv_clip,
+                    awr_temperature=self.cfg.awr_temperature,
+                    awr_max_weight=self.cfg.awr_max_weight,
                     **extra_kwargs,
                 )
 

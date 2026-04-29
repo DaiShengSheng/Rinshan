@@ -135,7 +135,7 @@ def iql_loss(
     v: torch.Tensor,              # (B,) 当前 V 值
     v_next: torch.Tensor,         # (B,) 下一状态 V 值（目标网络）
     action_idx: torch.Tensor,     # (B,) 执行的动作
-    reward: torch.Tensor,         # (B,) GRP 计算的奖励
+    reward: torch.Tensor,         # (B,) GRP 2.0 shaped reward
     done: torch.Tensor,           # (B,) bool，是否终止
     q_target: torch.Tensor,       # (B,) Q target 值（来自当前状态的 target 网络）
     gamma: float = GAMMA,
@@ -143,16 +143,23 @@ def iql_loss(
     cql_weight: float = CQL_WEIGHT,
     v_weight: float = 1.0,
     offline: bool = True,
-    reward_clip: float = 50.0,
-    value_clip: float = 100.0,
+    reward_clip: float = 20.0,
+    value_clip: float = 50.0,
+    bc_weight: float = 0.0,
+    adv_clip: float = 20.0,
+    awr_temperature: float = 3.0,
+    awr_max_weight: float = 20.0,
 ) -> tuple[torch.Tensor, dict]:
     """
-    IQL（Implicit Q-Learning）损失
+    IQL（Implicit Q-Learning）损失 + GRP 2.0 anchored policy term
 
-    三个部分：
+    三个基础部分：
     1. Q-Loss: Bellman 残差  E[(r + γV(s') - Q(s,a))²]
     2. V-Loss: Expectile 回归，让 V(s) 追踪 Q 的高分位数（τ=0.9）
     3. CQL:    保守约束（离线 RL 防过估计，在线时可以关掉）
+
+    额外新增：
+    4. AWR 风格 advantage-weighted BC anchor，防止策略脱离 Stage2 基线过快。
     """
     B = q.shape[0]
     losses = {}
@@ -192,7 +199,19 @@ def iql_loss(
         cql = torch.nan_to_num(cql, nan=0.0, posinf=value_clip, neginf=-value_clip).clamp(-value_clip, value_clip)
         losses["cql_loss"] = float(cql.detach().cpu())
 
-    total = q_loss + v_weight * v_loss + cql_weight * cql
+    # 4. AWR / BC anchor：只在 advantage 高时更强地模仿离线动作
+    bc_loss = torch.tensor(0.0, device=q.device)
+    if bc_weight > 0:
+        q_safe = torch.nan_to_num(q.float(), nan=-1e9, neginf=-1e9, posinf=value_clip)
+        log_probs = F.log_softmax(q_safe, dim=-1)
+        taken_log_prob = log_probs[idx, action_idx]
+        adv_for_policy = (q_target.detach() - v.detach()).clamp(-adv_clip, adv_clip)
+        weights = torch.exp(adv_for_policy / max(awr_temperature, 1e-6)).clamp(max=awr_max_weight)
+        bc_loss = -(weights * taken_log_prob).mean()
+        losses["bc_loss"] = float(bc_loss.detach().cpu())
+        losses["awr_weight_mean"] = float(weights.detach().mean().cpu())
+
+    total = q_loss + v_weight * v_loss + cql_weight * cql + bc_weight * bc_loss
     total = torch.nan_to_num(total, nan=1e3, posinf=1e3, neginf=-1e3)
     losses["total"] = float(total.detach().cpu())
     return total, losses

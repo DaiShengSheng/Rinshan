@@ -3,6 +3,7 @@
 stage: 3
 model_preset: large
 stage1_ckpt: checkpoints/stage1_large/best.pt
+stage2_ckpt: checkpoints/stage2_best.pt
 
 data_dir: data/annotated_grp
 val_ratio: 0.02
@@ -17,6 +18,13 @@ grad_accum_steps: 8       # 等效 batch=1024
 max_grad_norm: 1.0
 
 # IQL 超参
+cql_weight: 0.1
+bc_weight: 0.2
+reward_clip: 20.0
+value_clip: 50.0
+adv_clip: 20.0
+awr_temperature: 3.0
+awr_max_weight: 20.0
 target_update_every: 100
 
 dtype: bfloat16
