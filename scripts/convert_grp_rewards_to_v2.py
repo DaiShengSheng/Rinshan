@@ -42,9 +42,10 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
 
-import torch
-
-from rinshan.model.grp import GRP, RewardCalculator
+# torch / GRP are NOT imported at module level — top-level PyTorch import
+# combined with fork(2) corrupts the thread pool in child processes and
+# causes every worker to silently crash or run single-threaded.
+# Import them lazily inside functions that actually need them.
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("convert_grp_rewards_to_v2")
@@ -80,9 +81,9 @@ def _build_grp_frames(rows: list[dict[str, Any]], player_id: int) -> torch.Tenso
 
 
 def _compute_transition_hand_rewards(lines: list[dict[str, Any]], device: str, grp_ckpt: str | None, platform: str) -> list[float]:
-    # 完全体 GRP 2.0：如果提供了 GRP 模型，则对每条 action 估计“当前状态到下一决策状态”
-    # 的 game value 变化；hand reward 用 round_delta_score 作为局内分支信号。
-    # 当前阶段为了保证稳健和成本可控，这里只精细重标跨局末动作，局内中间动作仍 hand_reward=0。
+    # NOTE: torch / GRP are imported lazily (not at module level) to avoid the
+    # fork+PyTorch thread-pool corruption that would cause every worker to crash.
+    # Current implementation uses only round_delta_score; grp_ckpt is reserved.
     hand_rewards = [0.0 for _ in lines]
     grouped_indices: dict[RoundKey, list[int]] = defaultdict(list)
     for idx, d in enumerate(lines):
