@@ -438,6 +438,45 @@ class RinshanAgent(BaseAgent):
 
             elif ptype == "naki_or_pass":
                 candidates, can_tsumo, _ = _build_naki_candidates(state, seat, pending, sim=self._sim)
+
+                # Rust board 是 naki 合法性的权威来源。Python simulator 只根据局面
+                # 粗推候选，可能把已经 furiten / 牌数不满足的 pon/chi/daiminkan 留在候选里。
+                # 这里按 Rust pending 的 can_* 字段做 authoritative reconcile。
+                if "can_ron" in pending:
+                    if pending.get("can_ron", False):
+                        if RON_AGARI_TOKEN not in candidates:
+                            candidates = [RON_AGARI_TOKEN] + candidates
+                    else:
+                        candidates = [t for t in candidates if t != RON_AGARI_TOKEN]
+
+                if not pending.get("can_pon", False):
+                    candidates = [t for t in candidates
+                                  if not (PON_OFFSET <= t < PON_OFFSET + NUM_TILE_TYPES)]
+                if not pending.get("can_daiminkan", False):
+                    candidates = [t for t in candidates
+                                  if not (DAIMINKAN_OFFSET <= t < DAIMINKAN_OFFSET + NUM_TILE_TYPES)]
+
+                can_chi_any = any(bool(pending.get(k, False))
+                                  for k in ("can_chi_low", "can_chi_mid", "can_chi_high"))
+                if not can_chi_any:
+                    candidates = [t for t in candidates
+                                  if not (CHI_OFFSET <= t < CHI_OFFSET + 90)]
+                else:
+                    # 进一步按 low/mid/high 精确裁剪 chi 候选，避免 form 级别误选。
+                    kept = []
+                    for t in candidates:
+                        if not (CHI_OFFSET <= t < CHI_OFFSET + 90):
+                            kept.append(t)
+                            continue
+                        chi_idx = t - CHI_OFFSET
+                        _, _, form = idx_to_chi_type(chi_idx)
+                        if form == 0 and pending.get("can_chi_low", False):
+                            kept.append(t)
+                        elif form == 1 and pending.get("can_chi_mid", False):
+                            kept.append(t)
+                        elif form == 2 and pending.get("can_chi_high", False):
+                            kept.append(t)
+                    candidates = kept
             else:
                 responses[i] = {"type": "pass", "actor": seat}
                 continue
@@ -917,16 +956,8 @@ def _build_naki_candidates(state, seat: int,
     pai = Tile.from_mjai(pending["tile"])
     tokens = sim._compute_naki_candidates(state, seat, discarder, pai)
 
-    # P2 fix: game_board is the authority on whether RON is legal.
-    # It tracks junme_furiten and riichi_furiten that GameState does not hold.
-    # Reconcile: if game_board says can_ron=False, forcibly remove RON from tokens;
-    # if game_board says can_ron=True and compute missed it, add it.
-    can_ron = bool(pending.get("can_ron", False))
-    if can_ron and RON_AGARI_TOKEN not in tokens:
-        tokens = [RON_AGARI_TOKEN] + tokens
-    elif not can_ron and RON_AGARI_TOKEN in tokens:
-        tokens = [t for t in tokens if t != RON_AGARI_TOKEN]
-
+    # 这里只做 simulator 的初始候选计算；真正的合法性裁剪在
+    # react_batch_requests() 里统一按 Rust pending 的 can_* 字段完成。
     if not tokens:
         tokens = [PASS_TOKEN]
     return tokens, False, False
