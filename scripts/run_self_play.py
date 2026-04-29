@@ -1,32 +1,45 @@
 """
 run_self_play.py — 自对弈 / 对战评估脚本
 
+后端（默认 Rust libriichi，比 Python Arena 快 10x+）：
+    不加参数          → 自动使用 Rust；libriichi 不可用时自动降级
+    --no_rust         → 强制 Python Arena（调试 / libriichi 不可用时使用）
+    --parallel_games  → 每个 wave 并发局数（默认等于 n_games，即一次跑完）
+                        调小可降显存压力，调大可提高 GPU 利用率
+
 用法：
-    # 随机 agent 冒烟测试
+    # 随机 agent 冒烟测试（自动 Python Arena）
     python scripts/run_self_play.py --mode random --n_games 4 --seed 42
 
-    # 单模型自对弈
-    python scripts/run_self_play.py \
-        --mode ai \
-        --ckpt checkpoints/stage3_base/best.pt \
-        --model_preset base \
-        --n_games 256 \
-        --output data/self_play \
+    # 单模型自对弈（默认 Rust）
+    python scripts/run_self_play.py \\
+        --mode ai \\
+        --ckpt checkpoints/stage3_best.pt \\
+        --model_preset base \\
+        --n_games 256 \\
         --device cuda
 
-    # 对战评估：stage3 vs stage1（各出 2 个 agent）
-    python scripts/run_self_play.py \
-        --mode versus \
-        --ckpt  checkpoints/stage3_base/best.pt \
-        --ckpt2 checkpoints/stage1_base/best.pt \
-        --model_preset base \
-        --n_games 200 \
-        --device cuda \
+    # 对战评估：stage3 vs stage2（默认 Rust TwoVsTwo）
+    python scripts/run_self_play.py \\
+        --mode versus \\
+        --ckpt  checkpoints/stage3_best.pt \\
+        --ckpt2 checkpoints/stage2_best.pt \\
+        --model_preset base \\
+        --n_games 200 \\
+        --device cuda \\
         --greedy
+
+    # 强制 Python Arena（调试用）
+    python scripts/run_self_play.py \\
+        --mode versus \\
+        --ckpt  checkpoints/stage3_best.pt \\
+        --ckpt2 checkpoints/stage2_best.pt \\
+        --n_games 100 --no_rust --device cuda
 
 输出：
     data/self_play/games_YYYYMMDD_HHMMSS.jsonl
-    每行一局游戏的完整 mjai 事件流（JSON list）
+    每行一局游戏记录（Rust 路径含 agent_names/ranks/scores；
+    Python 路径额外含 kyoku_logs）
 """
 from __future__ import annotations
 
@@ -39,6 +52,15 @@ from pathlib import Path
 
 # 将项目根目录加入 path
 sys.path.insert(0, str(Path(__file__).parent.parent))
+
+
+def _libriichi_available() -> bool:
+    """检测 libriichi Rust 扩展是否可用"""
+    try:
+        from libriichi.arena import TwoVsTwo, SelfPlay  # noqa: F401
+        return True
+    except ImportError:
+        return False
 
 
 def parse_args():
@@ -55,6 +77,12 @@ def parse_args():
                    help="输出目录")
     p.add_argument("--compress",      action="store_true",
                    help="输出 .jsonl.gz 压缩文件")
+    # 后端控制
+    p.add_argument("--no_rust",       action="store_true",
+                   help="强制使用 Python Arena（默认自动选 Rust；random 模式始终用 Python）")
+    p.add_argument("--parallel_games", type=int, default=None,
+                   help="Rust 后端每个 wave 并发局数（默认等于 n_games）；\n"
+                        "调小降显存压力，调大提高 GPU 利用率")
     # AI 模式参数
     p.add_argument("--ckpt",          type=str, default=None,
                    help="主模型 checkpoint 路径（ai/versus 模式必填）")
@@ -180,6 +208,160 @@ def build_versus_agents(args):
     return agents
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Rust 后端运行函数
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _save_rust_results(results, output_dir: str, compress: bool) -> None:
+    """把 Rust arena 结果序列化为 jsonl（简化格式，无 kyoku_logs）"""
+    out_dir  = Path(output_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    suffix    = ".jsonl.gz" if compress else ".jsonl"
+    out_path  = out_dir / f"games_{timestamp}{suffix}"
+    opener    = gzip.open if compress else open
+    with opener(out_path, "wt", encoding="utf-8") as f:
+        for i, r in enumerate(results):
+            entry = {
+                "game_id":      f"rust_{i:06d}",
+                "agent_names":  list(r.names),
+                "final_scores": list(r.scores),
+                "ranks":        list(r.rankings()),
+            }
+            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    print(f"[+] 已保存 {len(results)} 局对局 → {out_path}")
+
+
+def run_rust_versus(args) -> None:
+    """Rust TwoVsTwo 双模型对战（wave 循环，支持 --parallel_games）"""
+    import time
+    from rinshan.self_play.agent import RinshanAgent
+    from libriichi.arena import TwoVsTwo
+
+    # TwoVsTwo 每 round 跑 2 局（互换座位），n_games 和 wave 都必须是偶数
+    if args.n_games % 2 != 0:
+        args.n_games += 1
+        print(f"[!] n_games 调整为偶数 → {args.n_games}")
+
+    wave = args.parallel_games
+    if wave % 2 != 0:
+        wave += 1
+        print(f"[!] parallel_games 调整为偶数 → {wave}")
+
+    preset2  = args.ckpt2_preset or args.model_preset
+    model_ch = load_model(args.ckpt,  args.model_preset, args.device)
+    model_bl = load_model(args.ckpt2, preset2,            args.device)
+
+    agent_ch = RinshanAgent(model_ch, name="ch", device=args.device,
+                            temperature=args.temperature, top_p=args.top_p, greedy=args.greedy)
+    agent_bl = RinshanAgent(model_bl, name="bl", device=args.device,
+                            temperature=args.temperature, top_p=args.top_p, greedy=args.greedy)
+
+    arena       = TwoVsTwo(disable_progress_bar=args.quiet)
+    all_results = []
+    generated   = 0
+    t0          = time.time()
+
+    while generated < args.n_games:
+        this_wave = min(wave, args.n_games - generated)
+        # py_vs_py 第 4 参数是 rounds（每 round = 2 局）
+        results = arena.py_vs_py(agent_ch, agent_bl,
+                                 (args.seed + generated, 0),
+                                 this_wave // 2)
+        all_results.extend(results)
+        generated += this_wave
+        if not args.quiet:
+            elapsed_so_far = time.time() - t0
+            speed = generated / elapsed_so_far
+            print(f"\r[Arena] {generated}/{args.n_games} games  "
+                  f"({speed:.2f} 局/s)", end="", flush=True)
+
+    if not args.quiet:
+        print()
+
+    elapsed = time.time() - t0
+
+    ch_ranks, bl_ranks   = [], []
+    ch_scores, bl_scores = [], []
+    for r in all_results:
+        rr    = list(r.rankings())
+        sc    = list(r.scores)
+        names = list(r.names)
+        for seat in range(4):
+            if names[seat] == "ch":
+                ch_ranks.append(rr[seat]);  ch_scores.append(sc[seat])
+            elif names[seat] == "bl":
+                bl_ranks.append(rr[seat]);  bl_scores.append(sc[seat])
+
+    ch_avg   = sum(x + 1 for x in ch_ranks)  / max(len(ch_ranks),  1)
+    bl_avg   = sum(x + 1 for x in bl_ranks)  / max(len(bl_ranks),  1)
+    ch_first = sum(1 for x in ch_ranks  if x == 0) / max(len(ch_ranks),  1) * 100
+    bl_first = sum(1 for x in bl_ranks  if x == 0) / max(len(bl_ranks),  1) * 100
+    ch_score = sum(ch_scores) / max(len(ch_scores), 1)
+    bl_score = sum(bl_scores) / max(len(bl_scores), 1)
+    delta    = ch_avg - bl_avg
+    verdict  = ("↑ Challenger 胜" if delta < -0.05
+                else "↓ Baseline 胜" if delta > 0.05
+                else "→ 持平")
+
+    print(f"\n{'='*58}")
+    print(f"对战完成  {len(all_results)} 局 | 用时 {elapsed:.1f}s | "
+          f"速度 {len(all_results)/elapsed:.2f} 局/s")
+    print(f"{'─'*58}")
+    print(f"Challenger  平均顺位 {ch_avg:.3f}  "
+          f"一位率 {ch_first:.1f}%  平均得分 {ch_score:.0f}")
+    print(f"Baseline    平均顺位 {bl_avg:.3f}  "
+          f"一位率 {bl_first:.1f}%  平均得分 {bl_score:.0f}")
+    print(f"顺位差 Δ={delta:+.3f}  {verdict}")
+    print("="*58)
+
+    _save_rust_results(all_results, args.output, args.compress)
+
+
+def run_rust_selfplay(args) -> None:
+    """Rust SelfPlay 单模型自对弈（wave 循环，支持 --parallel_games）"""
+    import time
+    from rinshan.self_play.agent import RinshanAgent
+    from libriichi.arena import SelfPlay
+
+    model = load_model(args.ckpt, args.model_preset, args.device)
+    agent = RinshanAgent(model, name="selfplay", device=args.device,
+                         temperature=args.temperature, top_p=args.top_p, greedy=args.greedy)
+
+    arena       = SelfPlay(disable_progress_bar=args.quiet)
+    all_results = []
+    generated   = 0
+    t0          = time.time()
+
+    while generated < args.n_games:
+        this_wave = min(args.parallel_games, args.n_games - generated)
+        results   = arena.py_self_play(agent,
+                                       (args.seed + generated, 0),
+                                       this_wave)
+        all_results.extend(results)
+        generated += this_wave
+        if not args.quiet:
+            elapsed_so_far = time.time() - t0
+            speed = generated / elapsed_so_far
+            print(f"\r[Arena] {generated}/{args.n_games} games  "
+                  f"({speed:.2f} 局/s)", end="", flush=True)
+
+    if not args.quiet:
+        print()
+
+    elapsed = time.time() - t0
+    print(f"\n{'='*58}")
+    print(f"自对弈完成  {len(all_results)} 局 | 用时 {elapsed:.1f}s | "
+          f"速度 {len(all_results)/elapsed:.2f} 局/s")
+    print("="*58)
+
+    _save_rust_results(all_results, args.output, args.compress)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Python Arena 路径（原有逻辑，保持不变）
+# ─────────────────────────────────────────────────────────────────────────────
+
 def save_records(records, output_dir: str, compress: bool) -> Path:
     """把 GameRecord 序列化为 jsonl（或 jsonl.gz）"""
     out_dir = Path(output_dir)
@@ -269,9 +451,40 @@ def main():
     args = parse_args()
     import time
 
-    print(f"[Rinshan] mode={args.mode}  n_games={args.n_games}  "
-          f"seed={args.seed}  length={args.game_length}")
+    # parallel_games 默认等于 n_games（单 wave 跑完）
+    if args.parallel_games is None:
+        args.parallel_games = args.n_games
 
+    # random 模式没有 Rust 支持；其余默认走 Rust
+    use_rust = (
+        args.mode != "random"
+        and not args.no_rust
+        and _libriichi_available()
+    )
+
+    if args.mode != "random" and not args.no_rust and not _libriichi_available():
+        print("[!] libriichi 不可用，自动降级到 Python Arena")
+
+    backend = "Rust libriichi" if use_rust else "Python Arena"
+    print(f"[Rinshan] mode={args.mode}  n_games={args.n_games}  "
+          f"seed={args.seed}  length={args.game_length}  "
+          f"backend={backend}  parallel_games={args.parallel_games}")
+
+    # ── Rust 路径 ────────────────────────────────────────────────
+    if use_rust:
+        if args.mode == "versus":
+            if not args.ckpt:
+                raise ValueError("versus 模式必须指定 --ckpt")
+            if not args.ckpt2:
+                raise ValueError("versus 模式必须指定 --ckpt2")
+            run_rust_versus(args)
+        elif args.mode == "ai":
+            if not args.ckpt:
+                raise ValueError("ai 模式必须指定 --ckpt")
+            run_rust_selfplay(args)
+        return
+
+    # ── Python Arena 路径 ────────────────────────────────────────
     agents = build_agents(args)
     print(f"[+] Agents: {[a.name for a in agents]}")
 
