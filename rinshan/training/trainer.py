@@ -65,6 +65,10 @@ class TrainerConfig:
     adv_clip: float = 20.0          # Stage3 advantage clip for AWR
     awr_temperature: float = 3.0    # Stage3 AWR temperature
     awr_max_weight: float = 20.0    # Stage3 AWR max sample weight
+    game_expectile: float = 0.95    # GRP 2.0: game branch expectile
+    hand_expectile: float = 0.70    # GRP 2.0: hand branch expectile
+    game_reward_weight: float = 1.0 # game branch reward scale
+    hand_reward_weight: float = 1.0 # hand branch reward scale
 
 
 class Trainer:
@@ -198,6 +202,12 @@ class Trainer:
             reward = batch.get("reward")
             if reward is not None:
                 reward = reward.to(self.device).float()
+            reward_game = batch.get("reward_game")
+            if reward_game is not None:
+                reward_game = reward_game.to(self.device).float()
+            reward_hand = batch.get("reward_hand")
+            if reward_hand is not None:
+                reward_hand = reward_hand.to(self.device).float()
 
             # ── Stage 1: 行为克隆 ────
             if self.cfg.stage == 1:
@@ -248,6 +258,8 @@ class Trainer:
                         belief_pad_mask=self._to_device(batch.get("belief_pad_mask")),
                     )
                     q_target_val = compute_q_target(target_out, action_idx)
+                    q_target_game = target_out.q_game[torch.arange(action_idx.shape[0], device=action_idx.device), action_idx]
+                    q_target_hand = target_out.q_hand[torch.arange(action_idx.shape[0], device=action_idx.device), action_idx]
 
                 done = self._to_device(batch.get("done", batch.get("is_done"))).bool()
 
@@ -274,6 +286,20 @@ class Trainer:
                     adv_clip=self.cfg.adv_clip,
                     awr_temperature=self.cfg.awr_temperature,
                     awr_max_weight=self.cfg.awr_max_weight,
+                    q_game=out.q_game,
+                    v_game=out.v_game,
+                    v_next_game=next_out.v_game,
+                    reward_game=reward_game,
+                    q_target_game=q_target_game,
+                    q_hand=out.q_hand,
+                    v_hand=out.v_hand,
+                    v_next_hand=next_out.v_hand,
+                    reward_hand=reward_hand,
+                    q_target_hand=q_target_hand,
+                    game_expectile=self.cfg.game_expectile,
+                    hand_expectile=self.cfg.hand_expectile,
+                    game_reward_weight=self.cfg.game_reward_weight,
+                    hand_reward_weight=self.cfg.hand_reward_weight,
                     **extra_kwargs,
                 )
 

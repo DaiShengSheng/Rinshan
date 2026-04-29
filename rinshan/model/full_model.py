@@ -24,8 +24,12 @@ from rinshan.constants import (
 
 @dataclass
 class RinshanOutput:
-    q:            torch.Tensor             # (B, MAX_CANDIDATES)  Q 值
-    v:            torch.Tensor             # (B,)  状态价值
+    q:            torch.Tensor             # (B, MAX_CANDIDATES)  总 Q 值
+    v:            torch.Tensor             # (B,)  总状态价值
+    q_game:       torch.Tensor             # (B, MAX_CANDIDATES)  整场价值分支 Q
+    q_hand:       torch.Tensor             # (B, MAX_CANDIDATES)  局内价值分支 Q
+    v_game:       torch.Tensor             # (B,) 整场状态价值
+    v_hand:       torch.Tensor             # (B,) 局内状态价值
     belief_probs:  Optional[torch.Tensor]   # (B, 34, 3)  信念概率（已 sigmoid，供推理）
     belief_logits: Optional[torch.Tensor]   # (B, 34, 3)  信念 logits（用于 BCE loss）
     belief_vec:   Optional[torch.Tensor]   # (B, BELIEF_DIM)  信念向量
@@ -85,7 +89,7 @@ class RinshanModel(nn.Module):
         encode = self.transformer(tokens, belief_memory, pad_mask)
 
         # ── QV Head ────────────────────────────────────────────────────
-        q, v = self.qv_head(encode, candidate_mask)
+        q, v, q_game, q_hand, v_game, v_hand = self.qv_head(encode, candidate_mask)
 
         # ── Aux Heads (computed on demand during training) ──────────────
         aux_preds = None
@@ -95,6 +99,10 @@ class RinshanModel(nn.Module):
         return RinshanOutput(
             q=q,
             v=v,
+            q_game=q_game,
+            q_hand=q_hand,
+            v_game=v_game,
+            v_hand=v_hand,
             belief_probs=torch.sigmoid(belief_logits) if belief_logits is not None else None,
             belief_logits=belief_logits,
             belief_vec=belief_vec,

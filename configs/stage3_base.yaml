@@ -28,6 +28,10 @@ value_clip: 50.0    # Stage3 value/q clip
 adv_clip: 20.0      # AWR advantage clip
 awr_temperature: 3.0
 awr_max_weight: 20.0
+game_expectile: 0.95
+hand_expectile: 0.70
+game_reward_weight: 1.0
+hand_reward_weight: 1.0
 
 # IQL 超参
 target_update_every: 100

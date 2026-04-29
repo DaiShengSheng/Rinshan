@@ -26,16 +26,29 @@ class QVHead(nn.Module):
         super().__init__()
         hidden = dim // 2
 
-        # V(s)：聚合全局信息 → 标量
-        self.v_net = nn.Sequential(
+        # GRP 2.0：双 value 分解
+        # - v_game / a_game：长期整场名次价值（GRP game value）
+        # - v_hand / a_hand：局内得失点价值（hand / kyoku value）
+        self.v_game_net = nn.Sequential(
+            nn.Linear(dim, hidden),
+            nn.SiLU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden, 1),
+        )
+        self.v_hand_net = nn.Sequential(
             nn.Linear(dim, hidden),
             nn.SiLU(),
             nn.Dropout(dropout),
             nn.Linear(hidden, 1),
         )
 
-        # A(s,a)：每个 candidate token → 标量优势
-        self.a_net = nn.Sequential(
+        self.a_game_net = nn.Sequential(
+            nn.Linear(dim, hidden),
+            nn.SiLU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden, 1),
+        )
+        self.a_hand_net = nn.Sequential(
             nn.Linear(dim, hidden),
             nn.SiLU(),
             nn.Dropout(dropout),
@@ -46,40 +59,48 @@ class QVHead(nn.Module):
 
     def _init_weights(self):
         # 最后一层初始化为 0，避免训练初期 Q 值爆炸
-        nn.init.zeros_(self.v_net[-1].weight)
-        nn.init.zeros_(self.v_net[-1].bias)
-        nn.init.zeros_(self.a_net[-1].weight)
-        nn.init.zeros_(self.a_net[-1].bias)
+        for head in (self.v_game_net, self.v_hand_net, self.a_game_net, self.a_hand_net):
+            nn.init.zeros_(head[-1].weight)
+            nn.init.zeros_(head[-1].bias)
 
     def forward(
         self,
         encode: torch.Tensor,          # (B, S, dim) PolicyTransformer 输出
         candidate_mask: torch.Tensor,  # (B, MAX_CANDIDATES) bool，True = 合法动作
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         返回:
-          q: (B, MAX_CANDIDATES_LEN) 每个候选动作的 Q 值，非法动作为 -inf
-          v: (B,) 当前状态的 V 值
+          q:       (B, MAX_CANDIDATES_LEN) 总 Q 值，非法动作为 -inf
+          v:       (B,) 总状态价值 = v_game + v_hand
+          q_game:  (B, MAX_CANDIDATES_LEN) 整场价值分支
+          q_hand:  (B, MAX_CANDIDATES_LEN) 局内价值分支
+          v_game:  (B,) 整场状态价值
+          v_hand:  (B,) 局内状态价值
         """
-        B = encode.shape[0]
 
-        # V(s)：对全部 token 取均值池化后过 MLP
-        v = self.v_net(encode.mean(dim=1)).squeeze(-1)   # (B,)
+        def _dueling(v_branch: torch.Tensor, a_branch: torch.Tensor) -> torch.Tensor:
+            masked_a = a_branch.masked_fill(~candidate_mask, 0.0)
+            a_sum = masked_a.sum(dim=-1, keepdim=True)
+            a_count = candidate_mask.float().sum(dim=-1, keepdim=True).clamp(min=1)
+            a_mean = a_sum / a_count
+            q_branch = v_branch.unsqueeze(-1) + a_branch - a_mean
+            q_branch = q_branch.masked_fill(~candidate_mask, float('-inf'))
+            return q_branch
 
-        # A(s,a)：取序列最后 MAX_CANDIDATES 个位置（即 candidate tokens）
-        cand_encode = encode[:, -MAX_CANDIDATES_LEN:, :]  # (B, 32, dim)
-        a = self.a_net(cand_encode).squeeze(-1)            # (B, 32)
+        pooled = encode.mean(dim=1)
+        v_game = self.v_game_net(pooled).squeeze(-1)
+        v_hand = self.v_hand_net(pooled).squeeze(-1)
 
-        # Dueling：Q = V + A - mean(A)（只对合法动作计算均值）
-        masked_a = a.masked_fill(~candidate_mask, 0.0)
-        a_sum  = masked_a.sum(dim=-1, keepdim=True)           # (B, 1)
-        a_count = candidate_mask.float().sum(dim=-1, keepdim=True).clamp(min=1)
-        a_mean = a_sum / a_count                              # (B, 1)
+        cand_encode = encode[:, -MAX_CANDIDATES_LEN:, :]
+        a_game = self.a_game_net(cand_encode).squeeze(-1)
+        a_hand = self.a_hand_net(cand_encode).squeeze(-1)
 
-        q = v.unsqueeze(-1) + a - a_mean                     # (B, 32)
-        q = q.masked_fill(~candidate_mask, float('-inf'))    # 非法动作 -inf
+        q_game = _dueling(v_game, a_game)
+        q_hand = _dueling(v_hand, a_hand)
+        q = q_game + q_hand
+        v = v_game + v_hand
 
-        return q, v
+        return q, v, q_game, q_hand, v_game, v_hand
 
 
 # ─────────────────────────────────────────────

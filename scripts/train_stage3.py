@@ -99,6 +99,10 @@ def main():
         adv_clip            = float(cfg.get("adv_clip", 20.0)),
         awr_temperature     = float(cfg.get("awr_temperature", 3.0)),
         awr_max_weight      = float(cfg.get("awr_max_weight", 20.0)),
+        game_expectile      = float(cfg.get("game_expectile", 0.95)),
+        hand_expectile      = float(cfg.get("hand_expectile", 0.70)),
+        game_reward_weight  = float(cfg.get("game_reward_weight", 1.0)),
+        hand_reward_weight  = float(cfg.get("hand_reward_weight", 1.0)),
     )
     trainer = Trainer(trainer_cfg)
     device  = trainer.device

@@ -107,7 +107,9 @@ class OnlineBuffer:
                 if i == last_idx_by_seat[seat]:
                     r += ann.round_delta_score / self.score_scale
 
-                encoded["reward"] = torch.tensor(r, dtype=torch.float32)
+                encoded["reward_game"] = torch.tensor(0.0, dtype=torch.float32)
+                encoded["reward_hand"] = torch.tensor(r, dtype=torch.float32)
+                encoded["reward"] = encoded["reward_game"] + encoded["reward_hand"]
 
                 # 如果该玩家在本局有前驱状态，凑成一个 Transition
                 if seat in kyoku_prev:
@@ -125,7 +127,9 @@ class OnlineBuffer:
 
         # 整场游戏结束，处理剩余的最后状态，打上 done=True 并给予顺位奖励
         for seat, prev in prev_by_seat.items():
-            final_r = prev["reward"].item() + rank_rewards[seat]
+            prev["reward_game"] = torch.tensor(rank_rewards[seat], dtype=torch.float32)
+            prev["reward"] = prev["reward_game"] + prev["reward_hand"]
+            final_r = prev["reward"].item()
             self._buf.append(Transition(
                 encoded=prev,
                 next_encoded=_zero_encoded_like(prev),

@@ -131,13 +131,13 @@ def distill_loss(
 # ─────────────────────────────────────────────
 
 def iql_loss(
-    q: torch.Tensor,              # (B, N) 当前 Q 值
-    v: torch.Tensor,              # (B,) 当前 V 值
-    v_next: torch.Tensor,         # (B,) 下一状态 V 值（目标网络）
+    q: torch.Tensor,              # (B, N) 当前总 Q 值
+    v: torch.Tensor,              # (B,) 当前总 V 值
+    v_next: torch.Tensor,         # (B,) 下一状态总 V 值（目标网络）
     action_idx: torch.Tensor,     # (B,) 执行的动作
-    reward: torch.Tensor,         # (B,) GRP 2.0 shaped reward
+    reward: torch.Tensor,         # (B,) 总 shaped reward
     done: torch.Tensor,           # (B,) bool，是否终止
-    q_target: torch.Tensor,       # (B,) Q target 值（来自当前状态的 target 网络）
+    q_target: torch.Tensor,       # (B,) 总 Q target（来自当前状态的 target 网络）
     gamma: float = GAMMA,
     expectile: float = IQL_EXPECTILE,
     cql_weight: float = CQL_WEIGHT,
@@ -149,17 +149,30 @@ def iql_loss(
     adv_clip: float = 20.0,
     awr_temperature: float = 3.0,
     awr_max_weight: float = 20.0,
+    q_game: Optional[torch.Tensor] = None,
+    v_game: Optional[torch.Tensor] = None,
+    v_next_game: Optional[torch.Tensor] = None,
+    reward_game: Optional[torch.Tensor] = None,
+    q_target_game: Optional[torch.Tensor] = None,
+    q_hand: Optional[torch.Tensor] = None,
+    v_hand: Optional[torch.Tensor] = None,
+    v_next_hand: Optional[torch.Tensor] = None,
+    reward_hand: Optional[torch.Tensor] = None,
+    q_target_hand: Optional[torch.Tensor] = None,
+    game_expectile: Optional[float] = None,
+    hand_expectile: Optional[float] = None,
+    game_reward_weight: float = 1.0,
+    hand_reward_weight: float = 1.0,
 ) -> tuple[torch.Tensor, dict]:
     """
-    IQL（Implicit Q-Learning）损失 + GRP 2.0 anchored policy term
+    IQL（Implicit Q-Learning）损失 + GRP 2.0 双 value 分解 + anchored policy term
 
-    三个基础部分：
-    1. Q-Loss: Bellman 残差  E[(r + γV(s') - Q(s,a))²]
-    2. V-Loss: Expectile 回归，让 V(s) 追踪 Q 的高分位数（τ=0.9）
-    3. CQL:    保守约束（离线 RL 防过估计，在线时可以关掉）
-
-    额外新增：
-    4. AWR 风格 advantage-weighted BC anchor，防止策略脱离 Stage2 基线过快。
+    基础部分：
+    1. 总 Q/V Bellman 与 expectile
+    2. game 分支：负责长期整场名次价值
+    3. hand 分支：负责局内得失点价值
+    4. CQL：保守约束
+    5. AWR 风格 advantage-weighted BC anchor，防止策略脱离 Stage2 基线过快。
     """
     B = q.shape[0]
     losses = {}
@@ -191,7 +204,49 @@ def iql_loss(
     ).mean()
     losses["v_loss"] = float(v_loss.detach().cpu())
 
-    # 3. CQL：对非法动作的 -inf 做屏蔽，否则 logsumexp 直接变 nan/inf
+    # 3.5 双 value 分支损失（GRP 2.0 完全体）
+    branch_total = torch.tensor(0.0, device=q.device)
+    if all(x is not None for x in (q_game, v_game, v_next_game, reward_game, q_target_game)):
+        q_game_taken = q_game[idx, action_idx]
+        reward_game = torch.nan_to_num(reward_game.float(), nan=0.0, posinf=reward_clip, neginf=-reward_clip).clamp(-reward_clip, reward_clip)
+        v_game = torch.nan_to_num(v_game.float(), nan=0.0, posinf=value_clip, neginf=-value_clip).clamp(-value_clip, value_clip)
+        v_next_game = torch.nan_to_num(v_next_game.float(), nan=0.0, posinf=value_clip, neginf=-value_clip).clamp(-value_clip, value_clip)
+        q_game_taken = torch.nan_to_num(q_game_taken.float(), nan=0.0, posinf=value_clip, neginf=-value_clip).clamp(-value_clip, value_clip)
+        q_target_game = torch.nan_to_num(q_target_game.float(), nan=0.0, posinf=value_clip, neginf=-value_clip).clamp(-value_clip, value_clip)
+        q_game_bellman = (reward_game * game_reward_weight + gamma * torch.where(done, torch.zeros_like(v_next_game), v_next_game)).detach().clamp(-value_clip, value_clip)
+        q_game_loss = F.mse_loss(q_game_taken, q_game_bellman)
+        game_tau = expectile if game_expectile is None else game_expectile
+        adv_game = (q_target_game.detach() - v_game).clamp(-value_clip, value_clip)
+        v_game_loss = torch.where(
+            adv_game >= 0,
+            game_tau * adv_game.pow(2),
+            (1 - game_tau) * adv_game.pow(2),
+        ).mean()
+        branch_total = branch_total + q_game_loss + v_weight * v_game_loss
+        losses["q_game_loss"] = float(q_game_loss.detach().cpu())
+        losses["v_game_loss"] = float(v_game_loss.detach().cpu())
+
+    if all(x is not None for x in (q_hand, v_hand, v_next_hand, reward_hand, q_target_hand)):
+        q_hand_taken = q_hand[idx, action_idx]
+        reward_hand = torch.nan_to_num(reward_hand.float(), nan=0.0, posinf=reward_clip, neginf=-reward_clip).clamp(-reward_clip, reward_clip)
+        v_hand = torch.nan_to_num(v_hand.float(), nan=0.0, posinf=value_clip, neginf=-value_clip).clamp(-value_clip, value_clip)
+        v_next_hand = torch.nan_to_num(v_next_hand.float(), nan=0.0, posinf=value_clip, neginf=-value_clip).clamp(-value_clip, value_clip)
+        q_hand_taken = torch.nan_to_num(q_hand_taken.float(), nan=0.0, posinf=value_clip, neginf=-value_clip).clamp(-value_clip, value_clip)
+        q_target_hand = torch.nan_to_num(q_target_hand.float(), nan=0.0, posinf=value_clip, neginf=-value_clip).clamp(-value_clip, value_clip)
+        q_hand_bellman = (reward_hand * hand_reward_weight + gamma * torch.where(done, torch.zeros_like(v_next_hand), v_next_hand)).detach().clamp(-value_clip, value_clip)
+        q_hand_loss = F.mse_loss(q_hand_taken, q_hand_bellman)
+        hand_tau = expectile if hand_expectile is None else hand_expectile
+        adv_hand = (q_target_hand.detach() - v_hand).clamp(-value_clip, value_clip)
+        v_hand_loss = torch.where(
+            adv_hand >= 0,
+            hand_tau * adv_hand.pow(2),
+            (1 - hand_tau) * adv_hand.pow(2),
+        ).mean()
+        branch_total = branch_total + q_hand_loss + v_weight * v_hand_loss
+        losses["q_hand_loss"] = float(q_hand_loss.detach().cpu())
+        losses["v_hand_loss"] = float(v_hand_loss.detach().cpu())
+
+    # 4. CQL：对非法动作的 -inf 做屏蔽，否则 logsumexp 直接变 nan/inf
     cql = torch.tensor(0.0, device=q.device)
     if offline and cql_weight > 0:
         q_safe = torch.nan_to_num(q.float(), nan=-1e9, neginf=-1e9, posinf=value_clip)
@@ -199,7 +254,7 @@ def iql_loss(
         cql = torch.nan_to_num(cql, nan=0.0, posinf=value_clip, neginf=-value_clip).clamp(-value_clip, value_clip)
         losses["cql_loss"] = float(cql.detach().cpu())
 
-    # 4. AWR / BC anchor：只在 advantage 高时更强地模仿离线动作
+    # 5. AWR / BC anchor：只在 advantage 高时更强地模仿离线动作
     bc_loss = torch.tensor(0.0, device=q.device)
     if bc_weight > 0:
         q_safe = torch.nan_to_num(q.float(), nan=-1e9, neginf=-1e9, posinf=value_clip)
@@ -211,7 +266,7 @@ def iql_loss(
         losses["bc_loss"] = float(bc_loss.detach().cpu())
         losses["awr_weight_mean"] = float(weights.detach().mean().cpu())
 
-    total = q_loss + v_weight * v_loss + cql_weight * cql + bc_weight * bc_loss
+    total = q_loss + v_weight * v_loss + branch_total + cql_weight * cql + bc_weight * bc_loss
     total = torch.nan_to_num(total, nan=1e3, posinf=1e3, neginf=-1e3)
     losses["total"] = float(total.detach().cpu())
     return total, losses
