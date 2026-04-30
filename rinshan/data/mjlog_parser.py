@@ -264,14 +264,14 @@ class MjlogParser:
 
                 oya = int(attrs.get("oya", "0"))
 
-                # 手牌（对手手牌用 "?" 表示）
+                # 手牌：天凤牌谱是完整复盘，hai0~hai3 四家都有明文
                 tehais = []
                 for i in range(4):
                     hai_str = attrs.get(f"hai{i}", "")
                     if hai_str:
                         tiles = [mjlog_tile_to_mjai(int(t)) for t in hai_str.split(",")]
                     else:
-                        tiles = ["?"] * 13
+                        tiles = []  # 数据缺失时给空列表，simulator 会跳过
                     tehais.append(tiles)
 
                 # 场风/局数
@@ -540,7 +540,7 @@ class MjlogParserV2(MjlogParser):
                     if hai_str:
                         tiles = [mjlog_tile_to_mjai(int(t)) for t in hai_str.split(",")]
                     else:
-                        tiles = ["?"] * 13
+                        tiles = []  # 数据缺失时给空列表，simulator 会跳过
                     tehais.append(tiles)
 
                 baze_map = {0:"E", 1:"S", 2:"W", 3:"N"}
