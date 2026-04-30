@@ -43,6 +43,23 @@ HONOR_END   = 33   # inclusive
 #   [514]       PAD          (padding)
 #
 # 总词表大小：515
+#
+# ── Progression 区（从 513 开始）──
+#   [513, 660]  PROG_DISCARD（手切）   4 seats × 37 = 148
+#   [661, 664]  PROG_DRAW              4 seats
+#   [665, 668]  PROG_RIICHI            4 seats
+#   [669, 758]  PROG_CHI               90 types
+#   [759, 894]  PROG_PON               4 × 34 = 136
+#   [895,1030]  PROG_DAIMINKAN         4 × 34 = 136
+#  [1031,1166]  PROG_ANKAN             4 × 34 = 136
+#  [1167,1302]  PROG_KAKAN             4 × 34 = 136
+#  [1303,1336]  PROG_NEWDORA           34
+#  [1337,1345]  HONBA_OFFSET           0-8
+#  [1346,1350]  KYOTAKU_OFFSET         0-4
+#  [1351,1359]  TILES_OFFSET           0-8
+#  [1360,1507]  PROG_DISCARD_TSUMOGIRI（摸切）  4 seats × 37 = 148
+#
+# 总词表大小：1508
 
 # 偏移量
 TILE_OFFSET      = 0     # 普通牌 0-33
@@ -79,8 +96,9 @@ TILES_OFFSET     = 1351  # 1351-1359: tiles_left bins 0-8
 # 从 513 开始，追加在动作空间之后
 # ─────────────────────────────────────────────
 # 编码规则：
-#   打牌事件  : PROG_DISCARD_BASE + seat*37 + tile_token_idx
-#   摸牌事件  : PROG_DRAW_BASE + seat
+#   打牌事件（手切）: PROG_DISCARD_BASE           + seat*37 + tile_token_idx
+#   打牌事件（摸切）: PROG_DISCARD_TSUMOGIRI_BASE  + seat*37 + tile_token_idx
+#   摸牌事件        : PROG_DRAW_BASE + seat
 #   立直事件  : PROG_RIICHI_BASE + seat
 #   吃         : PROG_CHI_BASE + chi_type (0-89)
 #   碰         : PROG_PON_BASE + seat*34 + tile_id
@@ -99,7 +117,11 @@ PROG_ANKAN_BASE     = 1031   # 1031 - 1166 (4 × 34 = 136)
 PROG_KAKAN_BASE     = 1167   # 1167 - 1302 (4 × 34 = 136)
 PROG_NEWDORA_BASE   = 1303   # 1303 - 1336 (34 tiles)
 
-VOCAB_SIZE = 1360  # extended to include HONBA/KYOTAKU/TILES_OFFSET tokens
+# PROG_DISCARD 摸切版：与手切版 token 空间完全对称，追加在词表末尾
+# 避免插入中间导致所有 PROG_* offset 连锁偏移
+PROG_DISCARD_TSUMOGIRI_BASE = 1360  # 1360-1507: 摸切打牌（4 seats × 37 = 148）
+
+VOCAB_SIZE = 1508  # +148 摸切 PROG_DISCARD token
 
 # ─────────────────────────────────────────────
 # 序列长度常量

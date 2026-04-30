@@ -18,7 +18,8 @@ from typing import Iterator
 from rinshan.tile import Tile, hand_to_counts
 from rinshan.algo.shanten import calc_shanten
 from rinshan.constants import (
-    PROG_DISCARD_BASE, PROG_DRAW_BASE, PROG_RIICHI_BASE,
+    PROG_DISCARD_BASE, PROG_DISCARD_TSUMOGIRI_BASE,
+    PROG_DRAW_BASE, PROG_RIICHI_BASE,
     PROG_CHI_BASE, PROG_PON_BASE, PROG_DAIMINKAN_BASE,
     PROG_ANKAN_BASE, PROG_KAKAN_BASE, PROG_NEWDORA_BASE,
 )
@@ -248,10 +249,9 @@ class MjaiSimulator:
                 # 打出的牌是自己的待张 → 永久振听
                 state.furiten[seat] = True
 
-        prog_tok = PROG_DISCARD_BASE + seat * 37 + (
-            tile.tile_id if not tile.is_aka
-            else {4: 34, 13: 35, 22: 36}[tile.tile_id]
-        )
+        tile_idx = tile.tile_id if not tile.is_aka else {4: 34, 13: 35, 22: 36}[tile.tile_id]
+        discard_base = PROG_DISCARD_TSUMOGIRI_BASE if tsumogiri else PROG_DISCARD_BASE
+        prog_tok = discard_base + seat * 37 + tile_idx
         state.progression.append(prog_tok)
 
         return anns
