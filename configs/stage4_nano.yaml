@@ -7,6 +7,8 @@ stage3_ckpt: checkpoints/stage3_nano/best.pt
 
 self_play:
   n_games_per_iter: 16
+  parallel_games: 16
+  model_preset: nano
   n_agents: 1
   game_length: tonpuu       # nano 用东风战，更快
   temperature: 0.8

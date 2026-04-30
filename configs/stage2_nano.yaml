@@ -15,6 +15,7 @@ total_steps: 20_000
 batch_size: 64
 grad_accum_steps: 1
 max_grad_norm: 1.0
+compile: false
 
 dtype: float32
 amp: false

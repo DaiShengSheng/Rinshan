@@ -3,7 +3,7 @@
 stage: 3
 model_preset: base
 stage1_ckpt: checkpoints/stage1_base/best.pt
-stage2_ckpt: checkpoints/stage2_best.pt
+stage2_ckpt: checkpoints/stage2_base/best.pt
 
 data_dir: data/annotated_grp
 # 注意：GRP 2.0 不再把每局 reward 广播到所有 action。
@@ -38,7 +38,7 @@ target_update_every: 100
 arena_gate_games: 200
 arena_parallel_games: 64
 arena_gate_rank_delta_threshold: 0.0
-arena_gate_baseline_ckpt: checkpoints/stage2_best.pt
+arena_gate_baseline_ckpt: checkpoints/stage2_base/best.pt
 
 dtype: bfloat16
 amp: true

@@ -4,8 +4,11 @@ stage: 4
 model_preset: base
 
 # 自对弈
+stage3_ckpt: checkpoints/stage3_base/best.pt
+
 self_play:
   backend: rust_self_play
+  model_preset: base
   n_games_per_iter: 128
   parallel_games: 64      # 单个 wave 并发局数；决定 GPU batch 大小
   game_length: hanchan    # hanchan / tonpuu

@@ -72,18 +72,21 @@ def main():
 
     # ── Trainer（Stage 2）─────────────────────
     trainer_cfg = TrainerConfig(
-        stage        = 2,
-        device       = cfg.get("device", "cuda"),
-        dtype        = cfg.get("dtype", "float32"),
-        amp          = cfg.get("amp", False),
-        model_preset = cfg.get("model_preset", "base"),
-        lr           = float(cfg.get("lr", 1e-4)),
-        weight_decay = float(cfg.get("weight_decay", 0.01)),
-        warmup_steps = int(cfg.get("warmup_steps", 500)),
-        total_steps  = int(cfg.get("total_steps", 50_000)),
-        save_dir     = cfg.get("save_dir", "checkpoints/stage2"),
-        save_every   = int(cfg.get("save_every", 5000)),
-        log_every    = int(cfg.get("log_every", 100)),
+        stage            = 2,
+        device           = cfg.get("device", "cuda"),
+        dtype            = cfg.get("dtype", "float32"),
+        amp              = cfg.get("amp", False),
+        compile          = cfg.get("compile", False),
+        model_preset     = cfg.get("model_preset", "base"),
+        lr               = float(cfg.get("lr", 1e-4)),
+        weight_decay     = float(cfg.get("weight_decay", 0.01)),
+        max_grad_norm    = float(cfg.get("max_grad_norm", 1.0)),
+        grad_accum_steps = int(cfg.get("grad_accum_steps", 1)),
+        warmup_steps     = int(cfg.get("warmup_steps", 500)),
+        total_steps      = int(cfg.get("total_steps", 50_000)),
+        save_dir         = cfg.get("save_dir", "checkpoints/stage2"),
+        save_every       = int(cfg.get("save_every", 5000)),
+        log_every        = int(cfg.get("log_every", 100)),
     )
     trainer = Trainer(trainer_cfg)
     device  = trainer.device

@@ -1,9 +1,9 @@
-# Stage 3: 离线 IQL (Large 规模)
+﻿# Stage 3: 离线 IQL (Large 规模)
 
 stage: 3
 model_preset: large
 stage1_ckpt: checkpoints/stage1_large/best.pt
-stage2_ckpt: checkpoints/stage2_best.pt
+stage2_ckpt: checkpoints/stage2_large/best.pt
 
 data_dir: data/annotated_grp
 val_ratio: 0.02
@@ -33,7 +33,7 @@ target_update_every: 100
 arena_gate_games: 200
 arena_parallel_games: 64
 arena_gate_rank_delta_threshold: 0.0
-arena_gate_baseline_ckpt: checkpoints/stage2_best.pt
+arena_gate_baseline_ckpt: checkpoints/stage2_large/best.pt
 
 dtype: bfloat16
 amp: true

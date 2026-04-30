@@ -1,6 +1,6 @@
 ﻿# GRP 训练配置
 
-data_dir: data/annotated_grp
+data_dir: data/annotated
 val_ratio: 0.05
 
 lr: 1e-3

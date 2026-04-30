@@ -7,6 +7,8 @@ stage3_ckpt: checkpoints/stage3_large/best.pt
 
 self_play:
   n_games_per_iter: 64
+  parallel_games: 32
+  model_preset: large
   n_agents: 1
   game_length: hanchan
   temperature: 0.8
