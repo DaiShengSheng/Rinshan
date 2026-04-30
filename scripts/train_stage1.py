@@ -181,7 +181,9 @@ def main():
         init_path = Path(cfg["init_ckpt"])
         ckpt = torch.load(init_path, map_location=trainer.device, weights_only=True)
         state = ckpt.get("model", ckpt.get("model_state_dict", ckpt))
-        trainer.model.load_state_dict(state, strict=True)
+        # torch.compile 会把模型包成 OptimizedModule，真正的 nn.Module 在 _orig_mod 下
+        raw_model = getattr(trainer.model, "_orig_mod", trainer.model)
+        raw_model.load_state_dict(state, strict=True)
         logger.info(f"Warm-started from {init_path} (optimizer reset, step=0)")
 
     val_every   = int(cfg.get("val_every", 2000))
