@@ -3,6 +3,7 @@ model_preset: base
 
 # 数据
 data_dir: data/annotated
+init_ckpt: checkpoints/stage1_base/stage1_migrated.pt  # 热启动权重（无断点时生效）
 val_ratio: 0.02
 shuffle_buffer: 20000
 

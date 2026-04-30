@@ -170,12 +170,19 @@ def main():
     )
     trainer = Trainer(trainer_cfg)
 
-    # 尝试加载最新 checkpoint
+    # 尝试加载最新 checkpoint（断点续跑优先）
     ckpt_dir = Path(trainer_cfg.save_dir)
     ckpts = sorted(ckpt_dir.glob("checkpoint_*.pt"), key=lambda p: int(p.stem.split("_")[-1]))
     if ckpts:
         trainer.load(ckpts[-1])
         logger.info(f"Resumed from {ckpts[-1]}")
+    elif cfg.get("init_ckpt"):
+        # 无断点时，从指定初始 checkpoint 热启动（只加载权重，optimizer 重建）
+        init_path = Path(cfg["init_ckpt"])
+        ckpt = torch.load(init_path, map_location=trainer.device, weights_only=True)
+        state = ckpt.get("model", ckpt.get("model_state_dict", ckpt))
+        trainer.model.load_state_dict(state, strict=True)
+        logger.info(f"Warm-started from {init_path} (optimizer reset, step=0)")
 
     val_every   = int(cfg.get("val_every", 2000))
     total_steps = int(cfg.get("total_steps", 100_000))
