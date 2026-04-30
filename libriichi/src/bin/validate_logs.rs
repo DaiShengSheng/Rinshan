@@ -1,6 +1,6 @@
-use riichi::chi_type::ChiType;
-use riichi::mjai::Event;
-use riichi::state::{ActionCandidate, PlayerState};
+use libriichi::chi_type::ChiType;
+use libriichi::mjai::Event;
+use libriichi::state::{ActionCandidate, PlayerState};
 use std::convert::identity;
 use std::env;
 use std::fs::File;
