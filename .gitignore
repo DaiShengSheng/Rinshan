@@ -15,4 +15,3 @@ data/
 *.log
 
 scripts/fetch_tenhou.py
-scripts/parse_tenhou.py

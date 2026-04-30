@@ -24,12 +24,13 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import json
 import logging
 import multiprocessing as mp
 from collections import defaultdict
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
+
+import orjson
 
 import torch
 
@@ -70,12 +71,12 @@ def _fill_file_impl(in_path: Path, out_path: Path, reward_calc) -> int:
     整个文件所有游戏所有前缀序列打成一个 mega-batch，只做一次 GRP forward。
     """
     lines = []
-    with open(in_path, "r", encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if line:
+    with open(in_path, "rb") as f:          # rb + orjson: ~3x faster than json
+        for raw in f:
+            raw = raw.strip()
+            if raw:
                 try:
-                    lines.append(json.loads(line))
+                    lines.append(orjson.loads(raw))
                 except Exception:
                     pass
     if not lines:
@@ -98,6 +99,7 @@ def _fill_file_impl(in_path: Path, out_path: Path, reward_calc) -> int:
         idxs.sort(key=lambda i: (
             lines[i].get("round_wind", 0),
             lines[i].get("round_num",  1),
+            lines[i].get("honba", 0),
         ))
 
         seen_rounds: set = set()
@@ -188,9 +190,10 @@ def _fill_file_impl(in_path: Path, out_path: Path, reward_calc) -> int:
         n_filled += len(idxs)
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(out_path, "w", encoding="utf-8") as f:
+    with open(out_path, "wb") as f:
         for d in lines:
-            f.write(json.dumps(d, ensure_ascii=False) + "\n")
+            f.write(orjson.dumps(d))
+            f.write(b"\n")
 
     return n_filled
 
