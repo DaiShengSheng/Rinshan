@@ -4,7 +4,7 @@ data_dir: data/annotated
 val_ratio: 0.05
 
 lr: 1e-3
-weight_decay: 1e-4
+weight_decay: 1e-3
 epochs: 30
 batch_size: 1024
 

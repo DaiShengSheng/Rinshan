@@ -235,7 +235,7 @@ def train(args):
 
     # 分割训练/验证
     n = len(seqs)
-    val_n = max(1, int(n * 0.05))
+    val_n = max(1, int(n * args.val_ratio))
     idx   = list(range(n))
     random.shuffle(idx)
     train_idx = idx[val_n:]
@@ -257,7 +257,7 @@ def train(args):
     grp = GRP().to(device)
     grp_double = grp  # GRP 内部使用 float64
 
-    optimizer = AdamW(grp.parameters(), lr=args.lr, weight_decay=1e-4)
+    optimizer = AdamW(grp.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     scheduler = CosineAnnealingLR(optimizer, T_max=args.epochs, eta_min=args.lr * 0.1)
 
     save_dir = Path(args.save)
@@ -327,6 +327,8 @@ def main():
     parser.add_argument("--epochs", "-e", type=int, default=None)
     parser.add_argument("--batch",  "-b", type=int, default=None)
     parser.add_argument("--lr",           type=float, default=None)
+    parser.add_argument("--weight-decay",  type=float, default=None)
+    parser.add_argument("--val-ratio",     type=float, default=None)
     parser.add_argument("--limit",  "-n", type=int, default=None)
     parser.add_argument("--workers",   "-j", type=int, default=None, help="DataLoader num_workers")
     parser.add_argument("--fill-workers", type=int, default=None, help="并行读取 jsonl 的进程数")
@@ -341,7 +343,9 @@ def main():
         if args.save   is None: args.save   = cfg.get("save_dir",   "checkpoints/grp")
         if args.epochs is None: args.epochs = int(cfg.get("epochs",     30))
         if args.batch  is None: args.batch  = int(cfg.get("batch_size", 256))
-        if args.lr     is None: args.lr     = float(cfg.get("lr",       1e-3))
+        if args.lr           is None: args.lr           = float(cfg.get("lr",           1e-3))
+        if args.weight_decay is None: args.weight_decay = float(cfg.get("weight_decay",  1e-3))
+        if args.val_ratio    is None: args.val_ratio    = float(cfg.get("val_ratio",     0.05))
         if args.workers      is None: args.workers      = int(cfg.get("dataloader_workers", 0))
         if args.fill_workers is None: args.fill_workers = int(cfg.get("fill_workers", 8))
     else:
@@ -350,6 +354,8 @@ def main():
         if args.epochs       is None: args.epochs       = 30
         if args.batch        is None: args.batch        = 256
         if args.lr           is None: args.lr           = 1e-3
+        if args.weight_decay is None: args.weight_decay = 1e-3
+        if args.val_ratio    is None: args.val_ratio    = 0.05
         if args.workers      is None: args.workers      = 0
         if args.fill_workers is None: args.fill_workers = 8
 
