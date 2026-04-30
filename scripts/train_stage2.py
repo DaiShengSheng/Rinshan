@@ -91,27 +91,31 @@ def main():
     # 从 Stage 1 加载权重（学生网络初始化）
     logger.info(f"Loading Stage 1 weights from {stage1_ckpt}")
     s1_ckpt = torch.load(stage1_ckpt, map_location=device, weights_only=True)
+    # 兼容两种键名：migrate 脚本用 "model"，旧格式可能是 "model_state_dict"
+    raw_sd = s1_ckpt.get("model", s1_ckpt.get("model_state_dict", s1_ckpt))
     # torch.compile 保存的权重带 _orig_mod. 前缀，加载前剥掉
-    raw_sd = s1_ckpt["model"]
     if any(k.startswith("_orig_mod.") for k in raw_sd):
         raw_sd = {k.replace("_orig_mod.", "", 1): v for k, v in raw_sd.items()}
-    trainer.model.load_state_dict(raw_sd, strict=False)  # aux_heads 在 stage2 不用，忽略多余 key
+    missing, unexpected = trainer.model.load_state_dict(raw_sd, strict=False)
+    logger.info(f"Student loaded — missing: {len(missing)}  unexpected: {len(unexpected)}")
+    if missing:
+        logger.warning(f"  missing keys: {missing[:8]}")
 
-    # Oracle：加载相同架构但接收全信息序列（含对手手牌）的模型
-    # 数据里有 opponent_hands，使用真正的 Oracle 蒸馏而非自蒸馏
+    # Oracle：全信息模型，接收含对手手牌的更长序列
+    # 数据里 opponent_hands 已由 parse_tenhou 填充，使用真正的 Oracle 蒸馏
     logger.info("Oracle = full-information model (true oracle distillation)")
     from rinshan.constants import MAX_ORACLE_SEQ_LEN
     oracle_transformer_cfg = TransformerConfig.from_preset(cfg.get("model_preset", "base"))
     oracle_transformer_cfg.max_seq_len = MAX_ORACLE_SEQ_LEN   # Oracle 序列更长，含对手手牌
-    trainer.set_oracle_model(
-        RinshanModel(
-            transformer_cfg=oracle_transformer_cfg,
-            use_belief=False,  # Oracle 已看全牌，不需要 Belief Net
-            use_aux=False,
-        )
+    oracle_model = RinshanModel(
+        transformer_cfg=oracle_transformer_cfg,
+        use_belief=False,  # Oracle 已看全牌，不需要 Belief Net
+        use_aux=False,
     )
-    # Oracle 加载相同的 Stage 1 权重（共享 encoder，只是输入序列更长）
-    trainer.oracle_model.load_state_dict(raw_sd, strict=False)
+    # Oracle 加载相同的 Stage 1 权重（共享 encoder，RoPE 不含绝对位置 embed，长度 mismatch 安全）
+    oracle_missing, oracle_unexpected = oracle_model.load_state_dict(raw_sd, strict=False)
+    logger.info(f"Oracle loaded — missing: {len(oracle_missing)}  unexpected: {len(oracle_unexpected)}")
+    trainer.set_oracle_model(oracle_model)
 
     ckpt_dir  = Path(trainer_cfg.save_dir)
     ckpt_dir.mkdir(parents=True, exist_ok=True)

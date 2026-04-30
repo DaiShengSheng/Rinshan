@@ -8,10 +8,18 @@ Usage:
   python scripts/fill_grp_rewards.py --data data/annotated/ --grp checkpoints/grp/grp_best.pt --output data/annotated_grp/
 
 关键设计：
+  - 输出格式为 GRP 2.0：每个 round（以 round_wind/round_num/honba 为唯一键）内
+    只有最后一个 action 保留 grp_reward 和 hand_reward，其余 action 均置 0.0。
+    这与 dataset.py 的 Stage3 逻辑一致（跨局/终局时才结算 game reward）。
   - 使用 spawn 上下文的 ProcessPoolExecutor，规避 Linux fork+CUDA 崩溃
   - 每个 worker 独立加载 GRP 到 CUDA，并行消化 CPU 瓶颈（JSON解析/tensor构建）
   - 每个文件内做 mega-batch forward，一次 kernel call 覆盖整文件所有游戏
   - 断点续跑：跳过已存在的输出文件
+
+注意：
+  convert_grp_rewards_to_v2.py 是历史迁移工具（用于将旧 1.0 广播格式数据转换为
+  2.0 格式），新填充的数据直接是 2.0 格式，无需再运行该迁移脚本。
+  analyze_grp_rewards.py 可用于验证填充结果：broadcast_round_ratio 应接近 0。
 """
 from __future__ import annotations
 
@@ -136,7 +144,7 @@ def _fill_file_impl(in_path: Path, out_path: Path, reward_calc) -> int:
         all_logits = reward_calc.grp(all_seqs)
         all_matrix = reward_calc.grp.calc_matrix(all_logits)  # (N_prefixes, 4, 4)
 
-    # ── 写回 rewards ───────────────────────────────────────────
+    # ── 写回 rewards（GRP 2.0：每 round 只有最后一个 action 保留非零值）──
     n_filled = 0
     for (pid, seen_rounds_sorted, idxs, final_rank_val), (start, end) in zip(
         game_meta, game_slices
@@ -151,12 +159,33 @@ def _fill_file_impl(in_path: Path, out_path: Path, reward_calc) -> int:
             for j, (rw, rn) in enumerate(seen_rounds_sorted)
             if j < len(rewards)
         }
+
+        # 按 round key（含 honba）将 idxs 分组，每组只有最后一个 action 写非零值
+        # round key = (round_wind, round_num, honba)，与 dataset.py grp_state_key 一致
+        from collections import defaultdict as _dd
+        round_groups: dict = _dd(list)
         for i in idxs:
-            d  = lines[i]
-            lines[i]["grp_reward"] = round_to_reward.get(
-                (d.get("round_wind", 0), d.get("round_num", 1)), 0.0
-            )
-            n_filled += 1
+            d = lines[i]
+            rkey = (d.get("round_wind", 0), d.get("round_num", 1), d.get("honba", 0))
+            round_groups[rkey].append(i)
+
+        for rkey, ridxs in round_groups.items():
+            rw, rn, _ = rkey
+            grp_r = round_to_reward.get((rw, rn), 0.0)
+
+            # 局内中间 action：grp_reward=0，hand_reward=0
+            for i in ridxs[:-1]:
+                lines[i]["grp_reward"]  = 0.0
+                lines[i]["hand_reward"] = 0.0
+
+            # 该 round 最后一个 action：填真实奖励
+            last_i = ridxs[-1]
+            lines[last_i]["grp_reward"]  = grp_r
+            lines[last_i]["hand_reward"] = float(
+                lines[last_i].get("round_delta_score", 0.0)
+            ) / 1000.0
+
+        n_filled += len(idxs)
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
     with open(out_path, "w", encoding="utf-8") as f:

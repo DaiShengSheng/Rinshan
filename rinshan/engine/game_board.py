@@ -991,7 +991,7 @@ class KyokuBoard:
         return result
 
     def _handle_chi(self, actor: int, r: dict) -> None:
-        discarder = r["discarder"]
+        discarder = r.get("discarder", r.get("target"))
         pai = Tile.from_mjai(r["pai"])
         consumed = [Tile.from_mjai(t) for t in r["consumed"]]
         for t in consumed:
@@ -1005,7 +1005,7 @@ class KyokuBoard:
         self._ask_discard_or_win(actor, is_tsumo=False)
 
     def _handle_pon(self, actor: int, r: dict) -> None:
-        discarder = r["discarder"]
+        discarder = r.get("discarder", r.get("target"))
         pai = Tile.from_mjai(r["pai"])
         consumed = [Tile.from_mjai(t) for t in r["consumed"]]
         for t in consumed:
@@ -1020,7 +1020,7 @@ class KyokuBoard:
         self._ask_discard_or_win(actor, is_tsumo=False)
 
     def _handle_daiminkan(self, actor: int, r: dict) -> None:
-        discarder = r["discarder"]
+        discarder = r.get("discarder", r.get("target"))
         pai = Tile.from_mjai(r["pai"])
         consumed = [Tile.from_mjai(t) for t in r["consumed"]]
         for t in consumed:
