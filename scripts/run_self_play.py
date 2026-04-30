@@ -261,12 +261,21 @@ def evaluate_versus_strength(args) -> dict:
     arena = TwoVsTwo(disable_progress_bar=args.quiet, log_dir=args.log_dir)
     all_results = []
     generated = 0
+    skipped = 0
     t0 = time.time()
+    _LIBRIICHI_HAND_ERRS = ("is not in hand", "cannot tsumogiri")
     while generated < n_games:
         this_wave = min(wave, n_games - generated)
-        results = arena.py_vs_py(agent_ch, agent_bl, (args.seed + generated, 0), this_wave // 2)
-        all_results.extend(results)
-        generated += this_wave
+        try:
+            results = arena.py_vs_py(agent_ch, agent_bl, (args.seed + generated, 0), this_wave // 2)
+            all_results.extend(results)
+            generated += this_wave
+        except RuntimeError as e:
+            if any(tag in str(e) for tag in _LIBRIICHI_HAND_ERRS):
+                skipped += 1
+                generated += 1
+            else:
+                raise
 
     elapsed = time.time() - t0
     ch_ranks, bl_ranks = [], []
@@ -334,18 +343,38 @@ def run_rust_selfplay(args) -> None:
     arena       = SelfPlay(disable_progress_bar=args.quiet)
     all_results = []
     generated   = 0
+    skipped     = 0
     t0          = time.time()
+
+    # libriichi 已知 bug：极少数 seed 下 py_self_play 会抛出
+    #   "X is not in hand" 或 "cannot tsumogiri" RuntimeError，
+    # 原因是 libriichi 下发给 Python 的 start_kyoku.tehais 与
+    # Rust 内部实际手牌存在间歇性不一致。
+    # workaround：跳过触发该 bug 的 seed（通常 <1%），继续生成后续局。
+    _LIBRIICHI_HAND_ERRS = ("is not in hand", "cannot tsumogiri")
 
     while generated < args.n_games:
         this_wave = min(args.parallel_games, args.n_games - generated)
-        results   = arena.py_self_play(agent,
-                                       (args.seed + generated, 0),
-                                       this_wave)
-        all_results.extend(results)
-        generated += this_wave
+        try:
+            results = arena.py_self_play(agent,
+                                         (args.seed + generated, 0),
+                                         this_wave)
+            all_results.extend(results)
+            generated += this_wave
+        except RuntimeError as e:
+            emsg = str(e)
+            if any(tag in emsg for tag in _LIBRIICHI_HAND_ERRS):
+                # 跳过这一 wave，seed 前进 1，让后续 seed 继续生成
+                skipped += 1
+                generated += 1
+                if not args.quiet:
+                    print(f"\n[warn] libriichi hand-state bug @ seed={args.seed+generated-1}"
+                          f"，已跳过（共跳过 {skipped} 局）", flush=True)
+            else:
+                raise
         if not args.quiet:
             elapsed_so_far = time.time() - t0
-            speed = generated / elapsed_so_far
+            speed = generated / max(elapsed_so_far, 1e-6)
             print(f"\r[Arena] {generated}/{args.n_games} games  "
                   f"({speed:.2f} 局/s)", end="", flush=True)
 

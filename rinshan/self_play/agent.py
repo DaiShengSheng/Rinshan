@@ -351,7 +351,7 @@ class RinshanAgent(BaseAgent):
             if len(player_events) < n_events:
                 state = _replay_events_to_state(player_events, seat)
             elif len(player_events) > n_events:
-                state = _advance_state_with_events(state, player_events[n_events:])
+                state = _advance_state_with_events(state, player_events[n_events:], pov_seat=seat)
 
         self._state_cache[cache_key] = {"state": state, "n_events": len(player_events)}
         return state
@@ -529,13 +529,14 @@ class RinshanAgent(BaseAgent):
             for local_i, orig_i in enumerate(batch_indices):
                 candidates = batch_candidates[local_i]
                 chosen_token = candidates[action_idx[local_i].item()]
+                q_cpu = q_values[local_i].cpu() if q_values is not None else None
                 responses[orig_i] = _token_to_mjai(
                     chosen_token,
                     batch_seats[local_i],
                     batch_states[local_i],
                     batch_pending[local_i],
                     batch_can_tsumo[local_i],
-                    q_values=q_values[local_i],
+                    q_values=q_cpu,
                     candidates=candidates,
                 )
 
@@ -672,6 +673,15 @@ def _replay_events_to_state(events: list[dict], pov_seat: int):
         etype = ev.get("type", "")
         if etype == "start_kyoku":
             bakaze_map = {"E": 0, "S": 1, "W": 2, "N": 3}
+            tehais_raw = ev.get("tehais", [[], [], [], []])
+            # 只取 pov_seat 自己的配牌，对手手牌通过后续 tsumo/dahai 事件追踪。
+            # 背景：libriichi 自对弈模式下 tehais 会把四家真实手牌全部下发给 Python，
+            # 但 Rust 内部状态与 Python 收到的 tehais 存在间歇性不一致（libriichi bug）。
+            # 对手手牌不参与 candidates 计算，因此直接忽略，只保留自己那份，
+            # 把潜在的"不存在牌"问题限制在最小范围内。
+            hands = [[] for _ in range(4)]
+            if pov_seat < len(tehais_raw):
+                hands[pov_seat] = [Tile.from_mjai(t) for t in tehais_raw[pov_seat] if t != "?"]
             state = GameState(
                 round_wind  = bakaze_map.get(ev.get("bakaze", "E"), 0),
                 round_num   = ev.get("kyoku", 1),
@@ -681,8 +691,7 @@ def _replay_events_to_state(events: list[dict], pov_seat: int):
                 scores      = list(ev.get("scores", [25000]*4)),
                 tiles_left  = 70,
                 dora_indicators = [Tile.from_mjai(ev["dora_marker"])] if "dora_marker" in ev else [],
-                hands       = [[Tile.from_mjai(t) for t in h if t != "?"]
-                               for h in ev.get("tehais", [[], [], [], []])],
+                hands       = hands,
                 discards    = [[] for _ in range(4)],
                 melds       = [[] for _ in range(4)],
                 riichi_declared = [False]*4,
@@ -771,10 +780,16 @@ def _replay_events_to_state(events: list[dict], pov_seat: int):
                         state.melds[actor][i] = ("kakan", tiles + [tile])
                         break
                 state.progression.append(PROG_KAKAN_BASE + actor*34 + tile.tile_id)
+        elif etype in ("end_kyoku", "hora", "ryukyoku"):
+            # 本局结束：清空所有手牌，防止上一局残余牌跨局污染下一局的 candidates。
+            # （Rust 会在下一个 start_kyoku 里重新下发新配牌，届时会完整重建 GameState。）
+            for actor in range(4):
+                state.hands[actor].clear()
+            state.last_draw = None
     return state
 
 
-def _advance_state_with_events(state, events: list[dict]):
+def _advance_state_with_events(state, events: list[dict], pov_seat: int = 0):
     """基于缓存状态增量回放新增事件。"""
     from rinshan.engine.simulator import _remove_tile
     from rinshan.tile import Tile
@@ -790,7 +805,9 @@ def _advance_state_with_events(state, events: list[dict]):
     for ev in events:
         etype = ev.get("type", "")
         if etype == "start_kyoku":
-            return _replay_events_to_state(events, 0)
+            # 新局开始：以完整事件流重建 state，必须传入正确的 pov_seat 确保手牌视角准确。
+            # （旧 bug：硬编码 pov_seat=0，导致非 0 座位在跨局缓存更新时手牌从错误视角重建。）
+            return _replay_events_to_state(events, pov_seat)
         elif etype == "tsumo":
             actor = ev.get("actor", 0)
             pai_str = ev.get("pai", "?")
@@ -864,6 +881,13 @@ def _advance_state_with_events(state, events: list[dict]):
                         state.melds[actor][i] = ("kakan", tiles + [tile])
                         break
                 state.progression.append(PROG_KAKAN_BASE + actor * 34 + tile.tile_id)
+        elif etype in ("end_kyoku", "hora", "ryukyoku"):
+            # 一局结束：清空所有手牌（避免上局残余牌跨局污染下一局 candidates）
+            # Rust 会在下一个 start_kyoku 里给出新手牌，届时 _replay_events_to_state
+            # 会用新 tehais 重建 state，所以这里只需保证手牌不残留即可。
+            for actor in range(4):
+                state.hands[actor].clear()
+            state.last_draw = None
     return state
 
 
@@ -1056,7 +1080,28 @@ def _token_to_mjai(token: int, seat: int, state, pending: dict,
             tile = Tile(idx)
         else:
             tile = {34: Tile(4, True), 35: Tile(13, True), 36: Tile(22, True)}[idx]
-        last = state.last_draw
+        # 安全校验：所选打牌必须在 Python 追踪的手牌中。
+        # 若不在，说明 Python state 与 Rust 状态出现漂移，fallback 到摸切（tsumogiri）。
+        # 这比把一张不存在的牌传给 Rust 导致 RuntimeError 更安全。
+        hand = state.hands[seat] if state is not None else []
+        tile_in_hand = any(
+            t.tile_id == tile.tile_id and (not tile.is_aka or t.is_aka)
+            for t in hand
+        )
+        if not tile_in_hand and state is not None:
+            last = state.last_draw
+            if last is not None:
+                return {
+                    "type": "dahai", "actor": seat,
+                    "pai": last.to_mjai(), "tsumogiri": True,
+                }
+            # last_draw 也不存在（理论上不该发生）——打手牌第一张兜底
+            if hand:
+                return {
+                    "type": "dahai", "actor": seat,
+                    "pai": hand[0].to_mjai(), "tsumogiri": False,
+                }
+        last = state.last_draw if state is not None else None
         tsumogiri = (last is not None and
                      last.tile_id == tile.tile_id and
                      last.is_aka == tile.is_aka)
