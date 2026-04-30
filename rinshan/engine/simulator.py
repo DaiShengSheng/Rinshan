@@ -850,7 +850,7 @@ class MjaiSimulator:
                     counts[tile_id] -= 1
 
         # 归一化：危险对手数 / 3 → [0.0, 0.33, 0.67, 1.0]
-        return [min(1.0, danger_count[t] / N_OPP) for t in range(34)]
+        return [danger_count[t] / N_OPP for t in range(34)]
 
 
 # ─────────────────────────────────────────────
