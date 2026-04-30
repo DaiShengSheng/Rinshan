@@ -340,9 +340,9 @@ impl RinshanBatchAgent {
             if let Some(i) = only_idx.filter(|&i| i != usize::MAX) {
                 let pai = match i as u8 {
                     0..=33 => must_tile!(i),
-                    34 => must_tile!(34),
-                    35 => must_tile!(35),
-                    36 => must_tile!(36),
+                    34 => must_tile!(34_u8),
+                    35 => must_tile!(35_u8),
+                    36 => must_tile!(36_u8),
                     _ => unreachable!(),
                 };
                 let tsumogiri = state.last_self_tsumo().is_some_and(|t| t == pai);

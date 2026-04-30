@@ -76,16 +76,34 @@ impl Candidate {
             return Ordering::Equal;
         }
         match by {
-            CandidateColumn::EV => match self.exp_values[0].total_cmp(&other.exp_values[0]) {
+            CandidateColumn::EV => match self
+                .exp_values
+                .first()
+                .copied()
+                .unwrap_or(0.)
+                .total_cmp(&other.exp_values.first().copied().unwrap_or(0.))
+            {
                 Ordering::Equal => self.cmp(other, CandidateColumn::WinProb),
                 o => o,
             },
-            CandidateColumn::WinProb => match self.win_probs[0].total_cmp(&other.win_probs[0]) {
+            CandidateColumn::WinProb => match self
+                .win_probs
+                .first()
+                .copied()
+                .unwrap_or(0.)
+                .total_cmp(&other.win_probs.first().copied().unwrap_or(0.))
+            {
                 Ordering::Equal => self.cmp(other, CandidateColumn::TenpaiProb),
                 o => o,
             },
             CandidateColumn::TenpaiProb => {
-                match self.tenpai_probs[0].total_cmp(&other.tenpai_probs[0]) {
+                match self
+                    .tenpai_probs
+                    .first()
+                    .copied()
+                    .unwrap_or(0.)
+                    .total_cmp(&other.tenpai_probs.first().copied().unwrap_or(0.))
+                {
                     Ordering::Equal => self.cmp(other, CandidateColumn::NotShantenDown),
                     o => o,
                 }
@@ -136,12 +154,19 @@ impl Candidate {
             .map(|r| format!("{}@{}", r.tile, r.count))
             .collect::<Vec<_>>()
             .join(",");
+        // exp_values / win_probs / tenpai_probs are empty for high-shanten
+        // (simple) candidates that skipped the full probability calculation.
+        // Use .first() to avoid index-out-of-bounds panics when brief_info()
+        // is called in an error context for hands with shanten > SHANTEN_THRES.
+        let ev = self.exp_values.first().copied().unwrap_or(0.);
+        let win = self.win_probs.first().copied().unwrap_or(0.);
+        let tenpai = self.tenpai_probs.first().copied().unwrap_or(0.);
         if can_discard {
             vec![
                 self.tile.to_string(),
-                format!("{:.03}", self.exp_values[0]),
-                format!("{:.03}", self.win_probs[0] * 100.),
-                format!("{:.03}", self.tenpai_probs[0] * 100.),
+                format!("{:.03}", ev),
+                format!("{:.03}", win * 100.),
+                format!("{:.03}", tenpai * 100.),
                 if self.shanten_down { "Yes" } else { "No" }.to_owned(),
                 self.required_tiles.len().to_string(),
                 self.num_required_tiles.to_string(),
@@ -149,9 +174,9 @@ impl Candidate {
             ]
         } else {
             vec![
-                format!("{:.03}", self.exp_values[0]),
-                format!("{:.03}", self.win_probs[0] * 100.),
-                format!("{:.03}", self.tenpai_probs[0] * 100.),
+                format!("{:.03}", ev),
+                format!("{:.03}", win * 100.),
+                format!("{:.03}", tenpai * 100.),
                 self.required_tiles.len().to_string(),
                 self.num_required_tiles.to_string(),
                 required_tiles,
