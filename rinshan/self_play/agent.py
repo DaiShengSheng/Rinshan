@@ -662,7 +662,8 @@ def _replay_events_to_state(events: list[dict], pov_seat: int):
     from rinshan.engine.simulator import _remove_tile
     from rinshan.tile import Tile
     from rinshan.constants import (
-        PROG_DISCARD_BASE, PROG_DRAW_BASE, PROG_RIICHI_BASE,
+        PROG_DISCARD_BASE, PROG_DISCARD_TSUMOGIRI_BASE,
+        PROG_DRAW_BASE, PROG_RIICHI_BASE,
         PROG_CHI_BASE, PROG_PON_BASE, PROG_DAIMINKAN_BASE,
         PROG_ANKAN_BASE, PROG_KAKAN_BASE, PROG_NEWDORA_BASE,
     )
@@ -726,10 +727,10 @@ def _replay_events_to_state(events: list[dict], pov_seat: int):
                 test[tile.tile_id] += 1
                 if _cs(test, len(state.melds[actor])) == -1:
                     state.furiten[actor] = True
-            prog_tok = PROG_DISCARD_BASE + actor * 37 + (
-                tile.tile_id if not tile.is_aka
-                else {4: 34, 13: 35, 22: 36}[tile.tile_id]
-            )
+            tile_idx = tile.tile_id if not tile.is_aka else {4: 34, 13: 35, 22: 36}[tile.tile_id]
+            tsumogiri = ev.get("tsumogiri", False)
+            discard_base = PROG_DISCARD_TSUMOGIRI_BASE if tsumogiri else PROG_DISCARD_BASE
+            prog_tok = discard_base + actor * 37 + tile_idx
             state.progression.append(prog_tok)
         elif etype == "reach":
             actor = ev.get("actor", 0)
@@ -794,7 +795,8 @@ def _advance_state_with_events(state, events: list[dict], pov_seat: int = 0):
     from rinshan.engine.simulator import _remove_tile
     from rinshan.tile import Tile
     from rinshan.constants import (
-        PROG_DISCARD_BASE, PROG_DRAW_BASE, PROG_RIICHI_BASE,
+        PROG_DISCARD_BASE, PROG_DISCARD_TSUMOGIRI_BASE,
+        PROG_DRAW_BASE, PROG_RIICHI_BASE,
         PROG_CHI_BASE, PROG_PON_BASE, PROG_DAIMINKAN_BASE,
         PROG_ANKAN_BASE, PROG_KAKAN_BASE, PROG_NEWDORA_BASE,
     )
@@ -830,9 +832,10 @@ def _advance_state_with_events(state, events: list[dict], pov_seat: int = 0):
                 test[tile.tile_id] += 1
                 if _cs(test, len(state.melds[actor])) == -1:
                     state.furiten[actor] = True
-            prog_tok = PROG_DISCARD_BASE + actor * 37 + (
-                tile.tile_id if not tile.is_aka else {4: 34, 13: 35, 22: 36}[tile.tile_id]
-            )
+            tile_idx = tile.tile_id if not tile.is_aka else {4: 34, 13: 35, 22: 36}[tile.tile_id]
+            tsumogiri = ev.get("tsumogiri", False)
+            discard_base = PROG_DISCARD_TSUMOGIRI_BASE if tsumogiri else PROG_DISCARD_BASE
+            prog_tok = discard_base + actor * 37 + tile_idx
             state.progression.append(prog_tok)
         elif etype == "reach":
             actor = ev.get("actor", 0)
