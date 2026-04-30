@@ -214,6 +214,7 @@ class MjaiSimulator:
         seat      = event.get("actor", 0)
         tile_str  = event.get("pai", "1z")
         tile      = Tile.from_mjai(tile_str)
+        tsumogiri = event.get("tsumogiri", False)
 
         # ── 在移除手牌之前 生成标注 ──────────────────
         # 此时手牌 = 摸牌后的完整手牌（包含待打出的 tile）
