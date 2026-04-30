@@ -616,7 +616,46 @@ impl BatchAgent for RinshanBatchAgent {
         self.pending[index] = None;
 
         if let Some(resp) = self.responses[index].take() {
-            return py_dict_to_event(&resp, self.player_ids[index]);
+            let ev = py_dict_to_event(&resp, self.player_ids[index])?;
+            // ── Dahai sanity-check ───────────────────────────────────────────
+            // libriichi bug: tehais sent to Python can diverge from Rust's
+            // internal tehai, so the model may choose a tile that Rust doesn't
+            // consider to be in hand.  We catch that here (before board.step
+            // calls validate_reaction and panics) and fall back to:
+            //   1. tsumogiri the last drawn tile, if available, OR
+            //   2. the first legally discardable tile according to Rust state.
+            if let Event::Dahai { pai, .. } = ev.event {
+                let cans = state.last_cans();
+                if cans.can_discard {
+                    let valid = state.discard_candidates_aka();
+                    if !valid[pai.as_usize()] {
+                        log::warn!(
+                            "rinshan agent: dahai {} not in Rust hand (seat {}), \
+                             falling back to tsumogiri",
+                            pai,
+                            self.player_ids[index],
+                        );
+                        // fallback 1: tsumogiri
+                        if let Some(tsumo) = state.last_self_tsumo() {
+                            return Ok(EventExt::no_meta(Event::Dahai {
+                                actor: self.player_ids[index],
+                                pai: tsumo,
+                                tsumogiri: true,
+                            }));
+                        }
+                        // fallback 2: first valid tile
+                        if let Some(idx) = valid.iter().position(|&ok| ok) {
+                            let fallback_pai = must_tile!(idx);
+                            return Ok(EventExt::no_meta(Event::Dahai {
+                                actor: self.player_ids[index],
+                                pai: fallback_pai,
+                                tsumogiri: false,
+                            }));
+                        }
+                    }
+                }
+            }
+            return Ok(ev);
         }
 
         // Fallback: pass (should not normally happen).
