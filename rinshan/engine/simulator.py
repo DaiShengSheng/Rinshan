@@ -756,6 +756,11 @@ class MjaiSimulator:
         # 累积每张牌的危险对手数
         danger_count = [0] * 34
 
+        # 快速判断：日志解析场景下对手手牌均不可见，直接返回全零
+        # （避免 3 × 34×34 次无效 shanten 枚举）
+        if all(not state.hands[opp] for opp in range(4) if opp != seat):
+            return [c / N_OPP for c in danger_count]
+
         for opp in range(4):
             if opp == seat:
                 continue
