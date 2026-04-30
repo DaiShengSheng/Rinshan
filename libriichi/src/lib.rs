@@ -121,6 +121,26 @@ use pyo3::prelude::*;
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
+/// Calculate the shanten number for a hand.
+///
+/// Args:
+///     tiles: length-34 tile counts (u8), indexed by tile ID.
+///     meld_count: number of open melds (0-4).
+///
+/// Returns:
+///     Shanten number as i8. -1 means complete (agari), 0 means tenpai.
+#[pyfunction]
+#[pyo3(name = "calc_shanten")]
+fn py_calc_shanten(tiles: &[u8], meld_count: u8) -> PyResult<i8> {
+    let arr: [u8; 34] = tiles.try_into().map_err(|_| {
+        pyo3::exceptions::PyValueError::new_err(format!(
+            "tiles must be exactly length 34, got {}",
+            tiles.len()
+        ))
+    })?;
+    Ok(algo::shanten::calc_all(&arr, meld_count))
+}
+
 /// This module provides implementations of the riichi mahjong including the
 /// following features:
 ///
@@ -147,6 +167,8 @@ fn libriichi(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
         m.add("__profile__", "release")?;
     }
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
+
+    m.add_function(wrap_pyfunction!(py_calc_shanten, m)?)?;
 
     consts::register_module(py, name, m)?;
     state::register_module(py, name, m)?;

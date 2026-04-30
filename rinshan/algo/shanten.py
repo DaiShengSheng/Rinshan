@@ -1,12 +1,8 @@
 """
-向听数计算（纯 Python 实现）
+向听数计算
 
-计算三种和牌形式的向听数取最小值：
-  - 通常形（4面子1雀头）
-  - 七对子
-  - 国士无双
-
-后续可替换为 Rust 实现（libriichi 的 shanten 模块）。
+优先使用 libriichi Rust 实现（基于查表，比 DFS 快约 50x）；
+若 libriichi 未编译或不含 calc_shanten，自动 fallback 到纯 Python DFS。
 
 参考：https://github.com/tomohxx/shanten-number-calculator
 """
@@ -14,9 +10,18 @@ from __future__ import annotations
 
 INF = 100
 
-
 from functools import lru_cache
 from typing import Iterable
+
+# ─────────────────────────────────────────────
+# Rust 加速路径（libriichi.calc_shanten）
+# ─────────────────────────────────────────────
+
+try:
+    from libriichi import calc_shanten as _rust_calc_shanten
+    _USING_RUST = True
+except ImportError:
+    _USING_RUST = False
 
 
 def _pack_counts(counts: Iterable[int]) -> bytes:
@@ -48,6 +53,8 @@ def calc_shanten(counts: list[int], meld_count: int = 0) -> int:
     Returns:
         向听数（-1 = 已和）
     """
+    if _USING_RUST:
+        return int(_rust_calc_shanten(bytes(int(c) for c in counts), meld_count))
     # Important: counts is frequently mutated by callers during enumeration.
     # Never cache on the list object itself; cache on a packed snapshot.
     return _calc_shanten_cached(_pack_counts(counts), int(meld_count))
