@@ -101,6 +101,27 @@ class Trainer:
             gradient_checkpointing=use_grad_ckpt,
         ).to(self.device)
 
+        # ── Stage 1：冻结全部 V head（v_game_net / v_hand_net）──────────────
+        # 原因：Dueling 架构中 q = v + a - mean(a)，CE loss 对 v 的梯度恒为零。
+        # v 完全游离于监督之外，只受 weight_decay / bias 漂移驱动，会跑偏到 -数万。
+        # Stage1 只需要学弃牌偏好（a_net），V 值交给 Stage2 用 GRP reward 从零学。
+        # 冻结后 migrate_stage1_weights 的"v 归零"策略也能永久保持，无需每次手动处理。
+        if cfg.stage in (1, 2):
+            for name, param in self.model.named_parameters():
+                if "qv_head.v_game_net" in name or "qv_head.v_hand_net" in name:
+                    param.requires_grad_(False)
+            if cfg.stage == 1:
+                logger.info(
+                    "Stage 1: v_game_net and v_hand_net frozen "
+                    "(V-value learning deferred to Stage 2)"
+                )
+            else:
+                logger.info(
+                    "Stage 2: v_game_net and v_hand_net frozen "
+                    "(distill_loss gradient on v is always zero; "
+                    "V-value learning deferred to Stage 3 IQL)"
+                )
+
         # 目标网络（Stage 3 用）
         self.target_model: Optional[RinshanModel] = None
         if cfg.stage == 3:

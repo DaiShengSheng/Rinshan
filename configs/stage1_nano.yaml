@@ -3,7 +3,7 @@
 stage: 1
 model_preset: nano
 
-data_dir: data/annotated_grp
+data_dir: data/annotated
 val_ratio: 0.05
 shuffle_buffer: 1000
 

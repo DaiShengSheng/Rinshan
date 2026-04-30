@@ -1,10 +1,10 @@
-# Stage 1: 行为克隆 (Large 规模)
+﻿# Stage 1: 行为克隆 (Large 规模)
 
 stage: 1
 model_preset: large
 
 # 数据
-data_dir: data/annotated_grp
+data_dir: data/annotated
 val_ratio: 0.02
 shuffle_buffer: 20000
 
