@@ -9,6 +9,7 @@ epochs: 30
 batch_size: 1024
 
 save_dir: checkpoints/grp
+grp_ckpt: checkpoints/grp/grp_best.pt   # fill_grp_rewards.py 读取的 checkpoint 路径
 platform: tenhou            # tenhou / jantama
 
 # train_grp.py DataLoader workers

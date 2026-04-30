@@ -218,7 +218,11 @@ def main():
             cfg = yaml.safe_load(f)
         if args.data     is None: args.data     = cfg.get("data_dir", None)
         if args.grp      is None:
-            args.grp = str(Path(cfg.get("save_dir", "checkpoints/grp")) / "grp_best.pt")
+            # 优先读 grp_ckpt，没有再回退到 save_dir/grp_best.pt
+            if "grp_ckpt" in cfg:
+                args.grp = cfg["grp_ckpt"]
+            else:
+                args.grp = str(Path(cfg.get("save_dir", "checkpoints/grp")) / "grp_best.pt")
         if args.platform is None: args.platform = cfg.get("platform", "tenhou")
         if args.workers  is None: args.workers  = int(cfg.get("fill_workers", 8))
     if args.platform is None: args.platform = "tenhou"
