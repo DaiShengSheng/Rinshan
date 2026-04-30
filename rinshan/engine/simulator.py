@@ -756,22 +756,27 @@ class MjaiSimulator:
         # 累积每张牌的危险对手数
         danger_count = [0] * 34
 
-        # 快速判断：日志解析场景下对手手牌均不可见，直接返回全零
-        # （避免 3 × 34×34 次无效 shanten 枚举）
-        if all(not state.hands[opp] for opp in range(4) if opp != seat):
-            return [c / N_OPP for c in danger_count]
-
         for opp in range(4):
             if opp == seat:
                 continue
 
             opp_hand = state.hands[opp]
-            # 对手手牌不可见（日志解析场景，"?" 已跳过导致手牌为空）
             if not opp_hand:
                 continue
 
             # 对手已振听，无法荣和任何牌
             if state.furiten[opp]:
+                continue
+
+            # 对手已立直：手牌固定，直接枚举待张，跳过 n_tiles 分支判断
+            if state.in_riichi[opp]:
+                counts = hand_to_counts(opp_hand)
+                mc = len(state.melds[opp])
+                for tile_id in range(34):
+                    counts[tile_id] += 1
+                    if calc_shanten(counts, mc) == -1:
+                        danger_count[tile_id] += 1
+                    counts[tile_id] -= 1
                 continue
 
             meld_count = len(state.melds[opp])
