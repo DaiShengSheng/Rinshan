@@ -212,7 +212,7 @@ DEFAULT_TOP_P       = 0.9
 AUX_WEIGHTS = {
     "shanten":      0.10,
     "tenpai_prob":  0.10,
-    "deal_in_risk": 0.0,   # 暂时关闭，等 Stage 4 自对弈数据回填
+    "deal_in_risk": 0.1,   # 复盘牌谱四家手牌全程可见，可直接计算
     "opp_tenpai":   0.10,
 }
 
