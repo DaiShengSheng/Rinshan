@@ -10,7 +10,7 @@ shuffle_buffer: 20000
 # 训练
 lr: 1e-4
 weight_decay: 0.1
-warmup_steps: 2000
+warmup_steps: 500
 total_steps: 200_000
 batch_size: 1024          # eff_batch=6144，显存 ~32GB
 grad_accum_steps: 6       # eff_batch=6144
