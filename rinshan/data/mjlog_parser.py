@@ -151,7 +151,11 @@ def _decode_kan(m: int) -> dict:
     base_tid  = tile_type * 4    # 该牌型的基础 tile_id
 
     if t & 3 == 0:  # 暗杠
-        pai_mjai = mjlog_tile_to_mjai(base_tid)
+        # base_tid = tile_type * 4，恰好等于赤牌 tile_id（16/52/88）时
+        # mjlog_tile_to_mjai 会返回 "0m"/"0p"/"0s"，导致 4 张全标成赤牌。
+        # 实际暗杠里最多 1 张赤牌，consumed 用普通牌 tile_id 表示即可。
+        repr_tid = base_tid + 1 if base_tid in _AKA_IDS else base_tid
+        pai_mjai = mjlog_tile_to_mjai(repr_tid)
         return {
             "type":     "ankan",
             "pai":      pai_mjai,
