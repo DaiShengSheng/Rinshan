@@ -267,6 +267,16 @@ impl AgariCalculator<'_> {
             return Some(Agari::Yakuman(1));
         }
 
+        // Guard: tehai must have exactly 14 tiles (3n+2 with n meld-groups consumed).
+        // If count is wrong (libriichi bug), treat as no agari rather than panic.
+        let tile_count: u8 = self.tehai.iter().sum();
+        if tile_count != 14 {
+            log::warn!(
+                "agari: unexpected tehai tile count {} (expected 14), skipping",
+                tile_count,
+            );
+            return None;
+        }
         let (tile14, key) = get_tile14_and_key(self.tehai);
         let divs = AGARI_TABLE.get(&key)?;
 
@@ -765,7 +775,7 @@ pub fn ensure_init() {
 }
 
 fn get_tile14_and_key(tiles: &[u8; 34]) -> ([u8; 14], u32) {
-    let mut tile14 = [0; 14];
+    let mut tile14 = [0u8; 14];
     let mut tile14_iter = tile14.iter_mut();
     let mut key = 0;
 
@@ -775,7 +785,7 @@ fn get_tile14_and_key(tiles: &[u8; 34]) -> ([u8; 14], u32) {
         for (num, c) in chunk.iter().copied().enumerate() {
             if c > 0 {
                 prev_in_hand = Some(());
-                *tile14_iter.next().unwrap() = (kind * 9 + num) as u8;
+                *tile14_iter.next().expect("tile14 overflow: tehai has >14 distinct tile kinds") = (kind * 9 + num) as u8;
                 bit_idx += 1;
 
                 match c {
@@ -811,7 +821,7 @@ fn get_tile14_and_key(tiles: &[u8; 34]) -> ([u8; 14], u32) {
         .skip(3 * 9)
         .filter(|&(_, &c)| c > 0)
         .for_each(|(tile_id, &c)| {
-            *tile14_iter.next().unwrap() = tile_id as u8;
+            *tile14_iter.next().expect("tile14 overflow: tehai has >14 distinct tile kinds (jihai)") = tile_id as u8;
             bit_idx += 1;
 
             match c {
