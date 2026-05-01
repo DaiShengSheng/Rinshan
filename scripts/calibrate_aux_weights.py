@@ -87,7 +87,7 @@ def _calc_dir(
             continue
 
         counts = hand_to_counts(opp_hand)
-        mc     = len(melds[opp])
+        mc     = min(len(melds[opp]), 4)   # Rust shanten 上限 4 副露
         n_tiles = sum(counts)
 
         if in_riichi[opp]:
@@ -220,7 +220,7 @@ def _process_game(events: list[dict], stats: dict) -> None:
 
             # shanten label
             counts = hand_to_counts(hands[seat])
-            mc     = len(melds[seat])
+            mc     = min(len(melds[seat]), 4)   # Rust shanten 上限 4 副露
             sht    = calc_shanten(counts, mc)
             label_sht = max(0, min(9, sht + 1))
             stats['shanten_hist'][label_sht] += 1
@@ -246,7 +246,7 @@ def _process_game(events: list[dict], stats: dict) -> None:
             if not furiten[seat] and not in_riichi[seat]:
                 test = hand_to_counts(hands[seat])
                 test[tile.tile_id] += 1
-                if calc_shanten(test, mc) == -1:
+                if calc_shanten(test, min(len(melds[seat]), 4)) == -1:
                     furiten[seat] = True
 
         # ── 鸣牌：更新手牌和副露 ──────────────────────────────
@@ -258,12 +258,24 @@ def _process_game(events: list[dict], stats: dict) -> None:
                 _remove_tile(hands[actor], t)
             melds[actor].append((etype, [pai] + consumed))
 
-        elif etype in ('ankan', 'kakan'):
+        elif etype == 'ankan':
+            # 暗杠：新增一个 meld，手牌移除 consumed（4张）
             actor    = ev['actor']
             consumed = [Tile.from_mjai(t) for t in ev.get('consumed', [])]
             for t in consumed:
                 _remove_tile(hands[actor], t)
-            melds[actor].append((etype, consumed))
+            melds[actor].append(('ankan', consumed))
+
+        elif etype == 'kakan':
+            # 加杠：升级已有 pon → kakan，meld 数不变，手牌移除那1张
+            actor = ev['actor']
+            pai   = Tile.from_mjai(ev['pai'])
+            _remove_tile(hands[actor], pai)
+            # 找到对应的 pon 升级，不 append 新 meld
+            for i, (mtype, tiles) in enumerate(melds[actor]):
+                if mtype == 'pon' and tiles[0].tile_id == pai.tile_id:
+                    melds[actor][i] = ('kakan', tiles + [pai])
+                    break
 
         # ── 立直宣言 ──────────────────────────────────────────
         elif etype == 'reach':
