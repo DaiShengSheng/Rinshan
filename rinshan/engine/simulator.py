@@ -734,22 +734,13 @@ class MjaiSimulator:
 
     def _calc_deal_in_risk(self, state: GameState, seat: int) -> list[float]:
         """
-        Label B：自家打出每张牌（34种）被荣和的风险度。
+        计算自家打出每张牌被荣和的风险度（Label B：对手待张集合）。
 
-        返回值定义：
-            risk[tile_id] = 能对该牌荣和的对手数 / 3
-            值域 = {0.0, 0.33, 0.67, 1.0}
+        risk[tile_id] = 听牌且未振听的对手中，tile 是其待张的对手数 / 3
+        值域 = {0.0, 0.33, 0.67, 1.0}
 
-        能对 tile 荣和的条件（对手 o 同时满足）：
-            1. o 处于听牌状态（shanten == 0）
-            2. tile 是 o 的待张（加入 o 手牌后 shanten == -1）
-            3. o 未振听（state.furiten[o] == False）
-
-        Label B 设计原则：
-            - 复盘牌谱（天凤）：四家手牌全程可见，精确计算，作为训练标签
-            - 推理场景：模型仅凭公开信息预测此值，不依赖对手手牌
-            - "?" guard 在 _handle_start_kyoku / _handle_tsumo 中保留兼容性，
-              但复盘牌谱中 state.hands[opp] 始终有完整手牌，不会触发全零路径
+        复盘牌谱四家手牌全程可见，精确计算作为训练标签；
+        推理时模型仅凭公开信息预测此值，"?" guard 保留兼容性。
         """
         from rinshan.tile import hand_to_counts
         from rinshan.algo.shanten import calc_shanten

@@ -212,8 +212,7 @@ DEFAULT_TOP_P       = 0.9
 AUX_WEIGHTS = {
     "shanten":      0.10,
     "tenpai_prob":  0.10,
-    "deal_in_risk": 0.30,  # Label B（对手待张集合）; 由 calibrate_aux_weights.py 在3年天凤数据上统计推算
-                           # baseline对齐=0.45, random-init对齐=0.18, 取几何均值√(0.45×0.18)≈0.28→保守取0.30
+    "deal_in_risk": 0.30,  # Label B：对手待张集合（复盘四家手牌可见，精确计算）
     "opp_tenpai":   0.10,
 }
 
