@@ -166,7 +166,7 @@ class MjaiSimulator:
             hand = []
             for t in h:
                 if t == "?":
-                    continue   # 推理场景下对手手牌不可见，跳过；复盘牌谱里不会出现
+                    continue   # 推理场景对手手牌不可见；复盘牌谱不会出现 '?'
                 hand.append(Tile.from_mjai(t))
             hands.append(hand)
 
@@ -196,7 +196,7 @@ class MjaiSimulator:
         seat = event.get("actor", state.current_player)
         tile_str = event.get("pai", "?")
         if tile_str == "?":
-            # 推理场景下对手摸牌不可见；复盘牌谱里所有 tsumo 均有明文 pai
+            # 推理场景对手摸牌不可见；复盘牌谱不会出现 '?'
             state.tiles_left -= 1
             state.progression.append(PROG_DRAW_BASE + seat)
             return
