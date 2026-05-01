@@ -314,12 +314,12 @@ def evaluate_versus_strength(args) -> dict:
         "baseline_avg_score": bl_score,
         "delta_rank": delta,
         "challenger_rank_se": se,
-    }
+    }, all_results
 
 
 def run_rust_versus(args) -> None:
     """Rust TwoVsTwo 双模型对战（wave 循环，支持 --parallel_games）"""
-    summary = evaluate_versus_strength(args)
+    summary, all_results = evaluate_versus_strength(args)
     delta = summary["delta_rank"]
     verdict = ("↑ Challenger 胜" if delta < -0.05
                 else "↓ Baseline 胜" if delta > 0.05
@@ -331,6 +331,7 @@ def run_rust_versus(args) -> None:
     print(f"Baseline    平均顺位 {summary['baseline_avg_rank']:.3f}  一位率 {summary['baseline_first_rate']*100:.1f}%  平均得分 {summary['baseline_avg_score']:.0f}")
     print(f"顺位差 Δ={delta:+.3f}  {verdict}")
     print("="*58)
+    _save_rust_results(all_results, args.output, args.compress)
 
 
 def run_rust_selfplay(args) -> None:

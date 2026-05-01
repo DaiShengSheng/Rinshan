@@ -16,3 +16,17 @@ data/
 
 scripts/fetch_tenhou.py
 scripts/parse_tenhou.py
+
+# cffi compile cache — platform-specific, not tracked
+rinshan/algo/shanten_c.py
+
+# compiled Rust extension — platform-specific wheel artifact
+libriichi/python/libriichi/*.pyd
+libriichi/python/libriichi/*.so
+
+# temporary game logs / profiler dumps
+tmp_game*.jsonl
+versus_log*.txt
+last_panic.txt
+panic_log.txt
+prof.out
