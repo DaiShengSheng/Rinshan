@@ -225,7 +225,10 @@ class MjlogParser:
         honba_now = 0
         kyotaku_now = 0
         current_scores = [250, 250, 250, 250]  # 以 250 代表 25000 点（/100）
-        riichi_who: Optional[int] = None  # 立直中的玩家
+        # last_draw_tile_id[seat] = 该玩家最近摸牌的 raw mjlog tile_id（未经 deaka）
+        # tsumogiri 判断：打出的 tile_id == last_draw_tile_id[seat] → 摸切
+        # 覆盖所有情况：普通摸切/手切、摸切立直/手切立直、立直后续摸切、鸣牌后出牌
+        last_draw_tile_id: dict = {0: None, 1: None, 2: None, 3: None}
 
         for m in all_tags:
             tag = m.group(1).upper()
@@ -298,7 +301,7 @@ class MjlogParser:
                     "scores":       list(current_scores),
                     "tehais":       tehais,
                 })
-                riichi_who = None
+                last_draw_tile_id = {0: None, 1: None, 2: None, 3: None}
                 continue
 
             # ── 摸牌：T/U/V/W ────────────────────
@@ -319,6 +322,8 @@ class MjlogParser:
                             continue
                     else:
                         seat = {"T":0,"U":1,"V":2,"W":3}.get(tag[0], -1)
+                    if seat >= 0:
+                        last_draw_tile_id[seat] = tile_id
                     events.append({
                         "type":  "tsumo",
                         "actor": seat,
@@ -342,7 +347,11 @@ class MjlogParser:
                     else:
                         seat = {"D":0,"E":1,"F":2,"G":3}.get(tag[0], -1)
                         tile_id = int(attrs_str.strip())
-                    tsumogiri = (riichi_who == seat)  # 立直后的摸切
+                    # 通用判断：打出的 tile_id == 该玩家上一次摸牌的 tile_id → 摸切
+                    # 覆盖所有情况：普通摸切、手切立直、摸切立直、立直后续摸切
+                    tsumogiri = (seat >= 0 and last_draw_tile_id.get(seat) == tile_id)
+                    if seat >= 0:
+                        last_draw_tile_id[seat] = None  # 打牌后清空
                     events.append({
                         "type":      "dahai",
                         "actor":     seat,
@@ -361,6 +370,8 @@ class MjlogParser:
                 meld["actor"] = who
                 # target: 被鸣的玩家（chi=上家, pon/kan=任意）
                 meld["target"] = (who - 1) % 4  # 简化：默认上家
+                # 鸣牌后出牌不算摸切（没有摸牌动作）
+                last_draw_tile_id[who] = None
                 events.append({"type": meld["type"], **meld})
                 continue
 
@@ -369,7 +380,6 @@ class MjlogParser:
                 who  = int(attrs.get("who", "0"))
                 step = int(attrs.get("step", "1"))
                 if step == 1:
-                    riichi_who = who
                     events.append({"type": "reach", "actor": who})
                 else:
                     # step=2: 扣 1000 点确认
@@ -416,7 +426,6 @@ class MjlogParser:
                     "scores":    list(current_scores),
                     "is_tsumo":  who == from_who,
                 })
-                riichi_who = None
 
                 if owari:
                     # 整场结束
@@ -448,7 +457,6 @@ class MjlogParser:
                     "scores":       list(current_scores),
                     "tenpai_hands": tenpai_hands,
                 })
-                riichi_who = None
                 continue
 
         events.append({"type": "end_game"})
@@ -508,7 +516,9 @@ class MjlogParserV2(MjlogParser):
         all_tags = list(re.finditer(r'<([A-Z][A-Z0-9_]*)([^/]*)/?>', xml_text))
 
         current_scores = [25000, 25000, 25000, 25000]
-        riichi_who: Optional[int] = None
+        # last_draw_tile_id[seat]: 该玩家最近一次摸牌的 raw mjlog tile_id
+        # 用于 tsumogiri 判断，鸣牌和新局时清空
+        last_draw_tile_id: dict = {0: None, 1: None, 2: None, 3: None}
 
         for m in all_tags:
             tag      = m.group(1).upper()
@@ -558,12 +568,13 @@ class MjlogParserV2(MjlogParser):
                     "scores":      list(current_scores),
                     "tehais":      tehais,
                 })
-                riichi_who = None
+                last_draw_tile_id = {0: None, 1: None, 2: None, 3: None}
                 continue
 
             if tag == "MJDRAW":
                 seat    = int(attrs.get("who", "0"))
                 tile_id = int(attrs.get("tile", "0"))
+                last_draw_tile_id[seat] = tile_id
                 events.append({"type": "tsumo", "actor": seat,
                                 "pai": mjlog_tile_to_mjai(tile_id)})
                 continue
@@ -571,7 +582,9 @@ class MjlogParserV2(MjlogParser):
             if tag == "MJDISCARD":
                 seat    = int(attrs.get("who", "0"))
                 tile_id = int(attrs.get("tile", "0"))
-                tsumogiri = (riichi_who == seat)
+                # 通用判断：打出 tile_id == 上次摸牌 tile_id → 摸切
+                tsumogiri = (last_draw_tile_id.get(seat) == tile_id)
+                last_draw_tile_id[seat] = None  # 打牌后清空
                 events.append({"type": "dahai", "actor": seat,
                                 "pai": mjlog_tile_to_mjai(tile_id),
                                 "tsumogiri": tsumogiri})
@@ -581,6 +594,8 @@ class MjlogParserV2(MjlogParser):
                 who   = int(attrs.get("who", "0"))
                 m_val = int(attrs.get("m", "0"))
                 meld  = decode_meld(m_val)
+                # 鸣牌后出牌不算摸切（没有摸牌动作）
+                last_draw_tile_id[who] = None
                 ev = {
                     "type":     meld["type"],
                     "actor":    who,
@@ -595,7 +610,6 @@ class MjlogParserV2(MjlogParser):
                 who  = int(attrs.get("who", "0"))
                 step = int(attrs.get("step", "1"))
                 if step == 1:
-                    riichi_who = who
                     events.append({"type": "reach", "actor": who})
                 else:
                     ten_str = attrs.get("ten", "")
@@ -627,7 +641,6 @@ class MjlogParserV2(MjlogParser):
                     "scores":    list(current_scores),
                     "is_tsumo":  who == from_who,
                 })
-                riichi_who = None
                 if owari:
                     events.append({"type": "end_kyoku",
                                    "final_scores": current_scores,
@@ -646,7 +659,6 @@ class MjlogParserV2(MjlogParser):
                         tenpai[i] = [mjlog_tile_to_mjai(int(t)) for t in hs.split(",")]
                 events.append({"type": "ryuukyoku", "deltas": deltas,
                                 "scores": list(current_scores), "tenpai_hands": tenpai})
-                riichi_who = None
                 continue
 
         events.append({"type": "end_game"})
