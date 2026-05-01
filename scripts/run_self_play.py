@@ -129,6 +129,9 @@ def load_model(ckpt_path: str, preset: str, device: str):
         state = state["model_state_dict"]
     elif "model" in state:
         state = state["model"]
+    # torch.compile 保存的 state_dict key 带 "_orig_mod." 前缀，strip 掉
+    if any(k.startswith("_orig_mod.") for k in state):
+        state = {k.removeprefix("_orig_mod."): v for k, v in state.items()}
     model.load_state_dict(state, strict=False)
     model.to(device)
     model.eval()
