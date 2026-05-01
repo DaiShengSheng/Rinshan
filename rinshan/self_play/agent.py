@@ -1099,14 +1099,20 @@ def _token_to_mjai(token: int, seat: int, state, pending: dict,
             tile = Tile(idx)
         else:
             tile = {34: Tile(4, True), 35: Tile(13, True), 36: Tile(22, True)}[idx]
-        # 安全校验：所选打牌必须在 Python 追踪的手牌中。
-        # 若不在，说明 Python state 与 Rust 状态出现漂移，fallback 到摸切（tsumogiri）。
-        # 这比把一张不存在的牌传给 Rust 导致 RuntimeError 更安全。
-        hand = state.hands[seat] if state is not None else []
-        tile_in_hand = any(
-            t.tile_id == tile.tile_id and (not tile.is_aka or t.is_aka)
-            for t in hand
-        )
+        # 安全校验：所选打牌必须在手牌中。
+        # 若 pending 含 valid_discards（Rust 权威弃牌集），直接信任——token 已在
+        # react_batch_requests 里被 valid_discards 替换过，不需要再查 Python 手牌。
+        # 否则，退回到 Python 追踪的手牌做校验，漂移时 fallback 到摸切。
+        rust_discards = pending.get("valid_discards") if pending is not None else None
+        if rust_discards is not None:
+            # token 已受 Rust 权威集约束，直接信任
+            tile_in_hand = True
+        else:
+            hand = state.hands[seat] if state is not None else []
+            tile_in_hand = any(
+                t.tile_id == tile.tile_id and (not tile.is_aka or t.is_aka)
+                for t in hand
+            )
         if not tile_in_hand and state is not None:
             last = state.last_draw
             if last is not None:
@@ -1115,10 +1121,11 @@ def _token_to_mjai(token: int, seat: int, state, pending: dict,
                     "pai": last.to_mjai(), "tsumogiri": True,
                 }
             # last_draw 也不存在（理论上不该发生）——打手牌第一张兜底
-            if hand:
+            _hand = state.hands[seat] if state is not None else []
+            if _hand:
                 return {
                     "type": "dahai", "actor": seat,
-                    "pai": hand[0].to_mjai(), "tsumogiri": False,
+                    "pai": _hand[0].to_mjai(), "tsumogiri": False,
                 }
         last = state.last_draw if state is not None else None
         tsumogiri = (last is not None and
