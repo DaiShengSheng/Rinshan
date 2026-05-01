@@ -267,13 +267,20 @@ impl AgariCalculator<'_> {
             return Some(Agari::Yakuman(1));
         }
 
-        // Guard: tehai must have exactly 14 tiles (3n+2 with n meld-groups consumed).
-        // If count is wrong (libriichi bug), treat as no agari rather than panic.
-        let tile_count: u8 = self.tehai.iter().sum();
-        if tile_count != 14 {
+        // Guard: tehai must have exactly the expected number of tiles.
+        // Each chi/pon/daiminkan consumes 3 tiles, each ankan consumes 4.
+        // Expected = 14 - 3*(chis+pons+minkans) - 4*ankans
+        // (ron adds 1 before calling here, tsumo doesn't)
+        // If count is wrong (libriichi state bug), skip rather than panic.
+        let meld_consumed = 3 * (self.chis.len() + self.pons.len() + self.minkans.len())
+            + 4 * self.ankans.len();
+        let expected: usize = 14usize.saturating_sub(meld_consumed);
+        let tile_count: usize = self.tehai.iter().map(|&c| c as usize).sum();
+        if tile_count != expected {
             log::warn!(
-                "agari: unexpected tehai tile count {} (expected 14), skipping",
+                "agari: unexpected tehai tile count {} (expected {}), skipping",
                 tile_count,
+                expected,
             );
             return None;
         }
