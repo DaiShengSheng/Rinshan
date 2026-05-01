@@ -239,7 +239,7 @@ impl AgariCalculator<'_> {
                 han: additional_hans + doras,
             })
         } else {
-            let (tile14, key) = get_tile14_and_key(self.tehai);
+            let (tile14, key) = get_tile14_and_key(self.tehai)?;
             let divs = AGARI_TABLE.get(&key)?;
 
             let fu = divs
@@ -267,24 +267,9 @@ impl AgariCalculator<'_> {
             return Some(Agari::Yakuman(1));
         }
 
-        // Guard: tehai must have exactly the expected number of tiles.
-        // Each chi/pon/daiminkan consumes 3 tiles, each ankan consumes 4.
-        // Expected = 14 - 3*(chis+pons+minkans) - 4*ankans
-        // (ron adds 1 before calling here, tsumo doesn't)
-        // If count is wrong (libriichi state bug), skip rather than panic.
-        let meld_consumed = 3 * (self.chis.len() + self.pons.len() + self.minkans.len())
-            + 4 * self.ankans.len();
-        let expected: usize = 14usize.saturating_sub(meld_consumed);
-        let tile_count: usize = self.tehai.iter().map(|&c| c as usize).sum();
-        if tile_count != expected {
-            log::warn!(
-                "agari: unexpected tehai tile count {} (expected {}), skipping",
-                tile_count,
-                expected,
-            );
-            return None;
-        }
-        let (tile14, key) = get_tile14_and_key(self.tehai);
+        // get_tile14_and_key returns None if tehai has >14 distinct tile kinds
+        // (corrupted state); treat as no agari rather than panic.
+        let (tile14, key) = get_tile14_and_key(self.tehai)?;
         let divs = AGARI_TABLE.get(&key)?;
 
         if return_if_any {
@@ -781,18 +766,19 @@ pub fn ensure_init() {
     assert_eq!(AGARI_TABLE.len(), AGARI_TABLE_SIZE);
 }
 
-fn get_tile14_and_key(tiles: &[u8; 34]) -> ([u8; 14], u32) {
+fn get_tile14_and_key(tiles: &[u8; 34]) -> Option<([u8; 14], u32)> {
     let mut tile14 = [0u8; 14];
     let mut tile14_iter = tile14.iter_mut();
-    let mut key = 0;
+    let mut key = 0u32;
 
-    let mut bit_idx = -1;
+    let mut bit_idx = -1i32;
     let mut prev_in_hand = None;
     for (kind, chunk) in tiles.chunks_exact(9).enumerate() {
         for (num, c) in chunk.iter().copied().enumerate() {
             if c > 0 {
                 prev_in_hand = Some(());
-                *tile14_iter.next().expect("tile14 overflow: tehai has >14 distinct tile kinds") = (kind * 9 + num) as u8;
+                // Return None instead of panicking if >14 distinct tile kinds.
+                *tile14_iter.next()? = (kind * 9 + num) as u8;
                 bit_idx += 1;
 
                 match c {
@@ -822,36 +808,31 @@ fn get_tile14_and_key(tiles: &[u8; 34]) -> ([u8; 14], u32) {
         }
     }
 
-    tiles
-        .iter()
-        .enumerate()
-        .skip(3 * 9)
-        .filter(|&(_, &c)| c > 0)
-        .for_each(|(tile_id, &c)| {
-            *tile14_iter.next().expect("tile14 overflow: tehai has >14 distinct tile kinds (jihai)") = tile_id as u8;
-            bit_idx += 1;
+    for (tile_id, &c) in tiles.iter().enumerate().skip(3 * 9).filter(|&(_, &c)| c > 0) {
+        *tile14_iter.next()? = tile_id as u8;
+        bit_idx += 1;
 
-            match c {
-                2 => {
-                    key |= 0b11 << bit_idx;
-                    bit_idx += 2;
-                }
-                3 => {
-                    key |= 0b1111 << bit_idx;
-                    bit_idx += 4;
-                }
-                4 => {
-                    key |= 0b11_1111 << bit_idx;
-                    bit_idx += 6;
-                }
-                // 1
-                _ => (),
+        match c {
+            2 => {
+                key |= 0b11 << bit_idx;
+                bit_idx += 2;
             }
-            key |= 0b1 << bit_idx;
-            bit_idx += 1;
-        });
+            3 => {
+                key |= 0b1111 << bit_idx;
+                bit_idx += 4;
+            }
+            4 => {
+                key |= 0b11_1111 << bit_idx;
+                bit_idx += 6;
+            }
+            // 1
+            _ => (),
+        }
+        key |= 0b1 << bit_idx;
+        bit_idx += 1;
+    }
 
-    (tile14, key)
+    Some((tile14, key))
 }
 
 /// `tehai` must already contain `tile`. `true` is returned if making an ankan
@@ -901,7 +882,10 @@ pub fn check_ankan_after_riichi(tehai: &[u8; 34], len_div3: u8, tile: Tile, stri
             let mut tehai_after = *tehai;
             tehai_after[tile_id] = 0;
             tehai_after[wait] += 1;
-            let (_, key) = get_tile14_and_key(&tehai_after);
+            let (_, key) = match get_tile14_and_key(&tehai_after) {
+                Some(v) => v,
+                None => return false,
+            };
             let Some(divs_after) = AGARI_TABLE.get(&key) else {
                 // The wait tile set will get smaller after kan.
                 return false;
@@ -914,7 +898,10 @@ pub fn check_ankan_after_riichi(tehai: &[u8; 34], len_div3: u8, tile: Tile, stri
                 // the waited tile to both of them.
                 let mut tehai_before = tehai_before_tsumo;
                 tehai_before[wait] += 1;
-                let (_, key) = get_tile14_and_key(&tehai_before);
+                let (_, key) = match get_tile14_and_key(&tehai_before) {
+                    Some(v) => v,
+                    None => return false,
+                };
                 let divs_before = AGARI_TABLE
                     .get(&key)
                     .expect("invalid riichi detected when testing ankan after riichi");
