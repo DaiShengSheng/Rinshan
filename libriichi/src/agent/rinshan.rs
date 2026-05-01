@@ -355,6 +355,33 @@ impl RinshanBatchAgent {
             }
         }
 
+        // Pass Rust's authoritative discard candidates to Python so it never
+        // selects a tile that is not actually in the Rust-side tehai.
+        // Encodes each legal tile as its rinshan mjai string, e.g. "3m", "0p".
+        if cans.can_discard && !state.self_riichi_accepted() {
+            let candidates = state.discard_candidates_aka();
+            let valid: Vec<json::Value> = candidates
+                .iter()
+                .enumerate()
+                .filter_map(|(i, &ok)| {
+                    if !ok {
+                        return None;
+                    }
+                    let tile = match i as u8 {
+                        0..=33 => must_tile!(i),
+                        34 => must_tile!(34_u8),
+                        35 => must_tile!(35_u8),
+                        36 => must_tile!(36_u8),
+                        _ => return None,
+                    };
+                    Some(json::Value::String(
+                        libriichi_tile_to_rinshan(&tile.to_string()).to_owned(),
+                    ))
+                })
+                .collect();
+            m.insert("valid_discards".into(), json::Value::Array(valid));
+        }
+
         m.insert("_game_key".into(), json::Value::String(game_key.to_owned()));
         json::Value::Object(m)
     }

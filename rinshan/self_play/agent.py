@@ -404,6 +404,22 @@ class RinshanAgent(BaseAgent):
             if ptype == "turn_action":
                 candidates, can_tsumo, _ = _build_turn_candidates(state, seat, sim=self._sim)
 
+                # Rust valid_discards: authoritative discard set from Rust tehai.
+                # Replaces Python-side candidates to eliminate hand-tracking drift.
+                if "valid_discards" in pending:
+                    from rinshan.constants import DISCARD_OFFSET
+                    from rinshan.tile import Tile as _Tile
+                    _rust_disc = set()
+                    for _pai in pending["valid_discards"]:
+                        _t = _Tile.from_mjai(_pai)
+                        if _t.is_aka:
+                            _rust_disc.add(DISCARD_OFFSET + {4:34,13:35,22:36}[_t.tile_id])
+                        else:
+                            _rust_disc.add(DISCARD_OFFSET + _t.tile_id)
+                    _non_disc = [_x for _x in candidates
+                                 if not (DISCARD_OFFSET <= _x < DISCARD_OFFSET + 37)]
+                    candidates = sorted(_rust_disc) + _non_disc
+
                 # Rust board 的 pending 是当前动作合法性的权威来源。
                 # Python simulator 只按“和牌形 / 向听数”推断，可能会把“无役自摸”
                 # 也视为 TSUMO_AGARI；而 Rust 会用 has_yaku() 严格校验。
