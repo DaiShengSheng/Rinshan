@@ -232,15 +232,22 @@ class Trainer:
 
             # ── Stage 1: 行为克隆 ────
             if self.cfg.stage == 1:
+                aux_t = batch.get("aux_targets", {})
                 return stage1_loss(
                     q=out.q,
                     action_idx=action_idx,
                     belief_logits=out.belief_logits,
+                    wait_logits=out.wait_logits,
                     actual_hands=(self._to_device(batch.get("actual_hands")).float()
                                  if batch.get("actual_hands") is not None else None),
+                    opp_wait_tiles=(self._to_device(aux_t["opp_wait_tiles"]).float()
+                                    if "opp_wait_tiles" in aux_t else None),
+                    opp_tenpai_mask=(self._to_device(aux_t["opp_tenpai_mask"]).float()
+                                     if "opp_tenpai_mask" in aux_t else None),
                     aux_preds=out.aux_preds,
                     aux_targets={k: self._to_device(v)
-                                 for k, v in batch.get("aux_targets", {}).items()},
+                                 for k, v in aux_t.items()
+                                 if k not in ("opp_wait_tiles", "opp_tenpai_mask")},
                 )
 
             # ── Stage 2: Oracle 蒸馏 ──
@@ -252,11 +259,39 @@ class Trainer:
                         candidate_mask=self._to_device(batch["candidate_mask"]),
                         pad_mask=self._to_device(batch.get("oracle_pad_mask")),
                     )
-                return distill_loss(
+                total, losses = distill_loss(
                     student_q=out.q,
                     oracle_q=oracle_out.q,
                     action_idx=action_idx,
                 )
+
+                # ── Belief + Wait 辅助损失（Stage2 顺带训练，让 wait_head 收敛）──
+                # belief_weight 降低，避免盖过蒸馏主损失
+                from .losses import belief_and_wait_loss
+                from rinshan.constants import BELIEF_WAIT_WEIGHT
+
+                aux_t = batch.get("aux_targets", {})
+                actual_hands  = batch.get("actual_hands")
+                opp_wait      = aux_t.get("opp_wait_tiles")
+                opp_mask      = aux_t.get("opp_tenpai_mask")
+                has_belief    = out.belief_logits is not None and actual_hands is not None
+                has_wait      = out.wait_logits is not None and opp_wait is not None
+
+                if has_belief or has_wait:
+                    bw_loss, bw_dict = belief_and_wait_loss(
+                        belief_logits  = out.belief_logits if has_belief else None,
+                        wait_logits    = out.wait_logits   if has_wait   else None,
+                        actual_hands   = self._to_device(actual_hands).float() if has_belief else None,
+                        opp_wait_tiles = self._to_device(opp_wait).float()     if has_wait   else None,
+                        opp_tenpai_mask= self._to_device(opp_mask).float() if opp_mask is not None else None,
+                        belief_weight  = 0.2,              # Stage2 降低权重
+                        wait_weight    = BELIEF_WAIT_WEIGHT,
+                    )
+                    total = total + bw_loss
+                    losses.update(bw_dict)
+
+                losses["total"] = total.item()
+                return total, losses
 
             # ── Stage 3: 离线 IQL ─────
             elif self.cfg.stage == 3:

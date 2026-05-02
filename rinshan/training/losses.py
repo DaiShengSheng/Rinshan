@@ -12,59 +12,42 @@ from typing import Optional
 import torch
 import torch.nn.functional as F
 
-from rinshan.constants import GAMMA, IQL_EXPECTILE, CQL_WEIGHT, DISTILL_TEMP
+from rinshan.constants import GAMMA, IQL_EXPECTILE, CQL_WEIGHT, DISTILL_TEMP, BELIEF_WAIT_WEIGHT
 
 
 # ─────────────────────────────────────────────
-# Stage 1：行为克隆损失
+# 公共辅助：Belief + Wait loss（Stage1 和 Stage2 共用）
 # ─────────────────────────────────────────────
 
-def stage1_loss(
-    q: torch.Tensor,              # (B, N) Q 值 logits
-    action_idx: torch.Tensor,     # (B,) 人类选择的动作 index
-    belief_logits: Optional[torch.Tensor] = None,  # (B, 34, 3) 手牌 logits
-    wait_logits: Optional[torch.Tensor] = None,    # (B, 34, 3) 待张 logits
-    actual_hands: Optional[torch.Tensor] = None,   # (B, 34, 3) 真实手牌
-    opp_wait_tiles: Optional[torch.Tensor] = None, # (B, 34, 3) 真实待张
-    opp_tenpai_mask: Optional[torch.Tensor] = None,# (B, 3) tenpai 掩码
-    aux_preds: Optional[dict]     = None,
-    aux_targets: Optional[dict]   = None,
+def belief_and_wait_loss(
+    belief_logits: Optional[torch.Tensor],   # (B, 34, 3)
+    wait_logits:   Optional[torch.Tensor],   # (B, 34, 3)
+    actual_hands:  Optional[torch.Tensor],   # (B, 34, 3)
+    opp_wait_tiles: Optional[torch.Tensor],  # (B, 34, 3)
+    opp_tenpai_mask: Optional[torch.Tensor], # (B, 3)
     belief_weight: float = 0.3,
-    wait_weight: float   = 0.15,
-    aux_weight: float    = 1.0,
+    wait_weight: float   = BELIEF_WAIT_WEIGHT,
 ) -> tuple[torch.Tensor, dict]:
     """
-    行为克隆（模仿学习）损失
-
-    主损失：CrossEntropy(Q logits, 人类选择的动作)
-    辅助：
-      belief loss  — 手牌预测 BCE，权重 belief_weight
-      wait loss    — 待张预测 BCE（只对 tenpai 对手），权重 wait_weight
-      aux losses   — 各辅助任务，权重 aux_weight × AUX_WEIGHTS[k]
+    独立的 Belief + Wait 损失，供 Stage1 和 Stage2 复用。
+    返回 (total_loss_tensor, loss_dict)。
+    total_loss_tensor 为 0 时表示没有可计算的 loss。
     """
-    losses = {}
+    device = (belief_logits if belief_logits is not None else wait_logits).device
+    total = torch.zeros(1, device=device, dtype=torch.float32).squeeze()
+    losses: dict = {}
 
-    # 主损失
-    action_loss = F.cross_entropy(q, action_idx)
-    losses["action"] = action_loss.item()
-    total = action_loss
-
-    # 手牌 Belief 损失
+    # 手牌 Belief BCE
     if belief_logits is not None and actual_hands is not None:
         target = (actual_hands > 0).float()
         b_loss = F.binary_cross_entropy_with_logits(belief_logits, target)
         losses["belief"] = b_loss.item()
         total = total + belief_weight * b_loss
 
-    # 待张预测损失（只对处于 tenpai 的对手计算）
+    # 待张 Wait BCE（只对 tenpai 对手计算）
     if wait_logits is not None and opp_wait_tiles is not None:
-        # wait_logits:    (B, 34, 3)
-        # opp_wait_tiles: (B, 34, 3)
-        # opp_tenpai_mask:(B, 3)  — 1 = 该对手处于 tenpai
         if opp_tenpai_mask is not None:
-            # 将 mask 广播到 (B, 34, 3)：只有 tenpai 对手的 tile 维度参与 loss
             mask = opp_tenpai_mask.unsqueeze(1).expand_as(wait_logits)  # (B, 34, 3)
-            # 有 tenpai 对手的样本才计算
             if mask.any():
                 w_loss = F.binary_cross_entropy_with_logits(
                     wait_logits[mask.bool()],
@@ -78,6 +61,53 @@ def stage1_loss(
             )
             losses["wait"] = w_loss.item()
             total = total + wait_weight * w_loss
+
+    return total, losses
+
+
+# ─────────────────────────────────────────────
+# Stage 1：行为克隆损失
+# ─────────────────────────────────────────────
+
+def stage1_loss(
+    q: torch.Tensor,              # (B, N) Q 值 logits
+    action_idx: torch.Tensor,     # (B,) 人类选择的动作 index
+    belief_logits: Optional[torch.Tensor] = None,
+    wait_logits: Optional[torch.Tensor] = None,
+    actual_hands: Optional[torch.Tensor] = None,
+    opp_wait_tiles: Optional[torch.Tensor] = None,
+    opp_tenpai_mask: Optional[torch.Tensor] = None,
+    aux_preds: Optional[dict]     = None,
+    aux_targets: Optional[dict]   = None,
+    belief_weight: float = 0.3,
+    wait_weight: float   = BELIEF_WAIT_WEIGHT,
+    aux_weight: float    = 1.0,
+) -> tuple[torch.Tensor, dict]:
+    """
+    行为克隆损失：BC 主损失 + Belief/Wait 辅助 + AuxHead 辅助
+    """
+    losses = {}
+
+    # 主损失
+    action_loss = F.cross_entropy(q, action_idx)
+    losses["action"] = action_loss.item()
+    total = action_loss
+
+    # Belief + Wait（复用公共函数）
+    has_belief = belief_logits is not None and actual_hands is not None
+    has_wait   = wait_logits is not None and opp_wait_tiles is not None
+    if has_belief or has_wait:
+        bw_loss, bw_dict = belief_and_wait_loss(
+            belief_logits=belief_logits if has_belief else None,
+            wait_logits=wait_logits if has_wait else None,
+            actual_hands=actual_hands,
+            opp_wait_tiles=opp_wait_tiles,
+            opp_tenpai_mask=opp_tenpai_mask,
+            belief_weight=belief_weight,
+            wait_weight=wait_weight,
+        )
+        total = total + bw_loss
+        losses.update(bw_dict)
 
     # 辅助任务损失
     if aux_preds is not None and aux_targets is not None:
