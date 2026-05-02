@@ -70,10 +70,13 @@ class GameState:
     # 各家立直时的弃牌数（立直牌在 discards[seat][riichi_discard_idx[seat]] 处）
     # -1 表示未立直
     riichi_discard_idx: list[int] = field(default_factory=lambda: [-1, -1, -1, -1])
-    # 振听（furiten）: True = cannot ron
-    # Simplified: only tracks permanent furiten (player discarded a tile in their own waits).
-    # Does not track temporary (same-round) furiten; that would require full wait calculation.
-    furiten: list[bool] = field(default_factory=lambda: [False, False, False, False])
+    # 振听状态（三种，均 True = cannot ron）
+    # 1. 永久振听：自家打出过自己的当前待张（检查现在的待张是否在 discards 里）
+    furiten:         list[bool] = field(default_factory=lambda: [False, False, False, False])
+    # 2. 同巡临时振听：本巡内对手打出了你的待张但你没荣，下次摸牌时清除
+    furiten_junme:   list[bool] = field(default_factory=lambda: [False, False, False, False])
+    # 3. 立直永久振听：立直后对手打出了你的待张但你没荣（立直中无法再打牌清除）
+    furiten_riichi:  list[bool] = field(default_factory=lambda: [False, False, False, False])
 
     # ── 当前动作玩家 ──────────────────────────
     current_player: int = 0
@@ -82,6 +85,10 @@ class GameState:
 
     # ── 进行 token 序列（公开事件，持续追加）─
     progression: list[int] = field(default_factory=list)
+
+    def is_furiten(self, seat: int) -> bool:
+        """综合三种振听：任一为 True 即不能荣"""
+        return self.furiten[seat] or self.furiten_junme[seat] or self.furiten_riichi[seat]
 
     def player_view(self, seat: int) -> "PlayerView":
         """生成指定座位的玩家视角（隐藏对手手牌）"""

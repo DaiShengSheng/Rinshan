@@ -1,4 +1,4 @@
-"""
+﻿"""
 MjaiSimulator — 消费 mjai 格式 JSON 事件流，生成 Annotation 序列
 
 流程：
@@ -196,9 +196,11 @@ class MjaiSimulator:
         seat = event.get("actor", state.current_player)
         tile_str = event.get("pai", "?")
         if tile_str == "?":
-            # 推理场景对手摸牌不可见；复盘牌谱不会出现 '?'
             state.tiles_left -= 1
             state.progression.append(PROG_DRAW_BASE + seat)
+            # 同巡临时振听：摸牌时清除（非立直者）
+            if not state.in_riichi[seat]:
+                state.furiten_junme[seat] = False
             return
         tile = Tile.from_mjai(tile_str)
         state.hands[seat].append(tile)
@@ -206,6 +208,9 @@ class MjaiSimulator:
         state.last_draw = tile
         state.current_player = seat
         state.progression.append(PROG_DRAW_BASE + seat)
+        # 同巡临时振听：摸牌时清除（非立直者）
+        if not state.in_riichi[seat]:
+            state.furiten_junme[seat] = False
 
     def _handle_dahai(
         self, event: dict, state: GameState, game_id: str
@@ -239,16 +244,25 @@ class MjaiSimulator:
         state.last_discard = tile
         state.last_draw    = None
 
-        # 振听更新（永久振听）：
-        # 打出了自己的待张之一 → 振听
-        # 注意：此时 tile 已从 hands 移除，hands 是打牌后的 13 张（门清）或副露后的更少
-        # 正确判断：把打出的牌加回 13 张手牌 → 向听数 == -1 说明打出的牌是待张
-        if not state.furiten[seat] and not state.in_riichi[seat]:
-            test_counts = hand_to_counts(state.hands[seat])
-            test_counts[tile.tile_id] += 1
-            if calc_shanten(test_counts, len(state.melds[seat])) == -1:
-                # 打出的牌是自己的待张 → 永久振听
-                state.furiten[seat] = True
+        # ── 振听更新 1：自家打出的牌是否在「当前」待张里 ────────────────
+        # 规则：只要你当前听的任一张牌出现在你的河牌里（包括刚打出的），就振听
+        # 前提：必须处于听牌状态（13张 shanten==0），否则没有待张，不触发振听
+        # 立直中不在此更新（立直后待张固定，改由 _update_furiten_on_others_discard 处理）
+        if not state.in_riichi[seat] and not state.furiten[seat]:
+            counts_after = hand_to_counts(state.hands[seat])
+            mc = len(state.melds[seat])
+            # 只有当前处于听牌状态才检查
+            if calc_shanten(counts_after, mc) == 0:
+                current_waits = set()
+                for w in range(34):
+                    counts_after[w] += 1
+                    if calc_shanten(counts_after, mc) == -1:
+                        current_waits.add(w)
+                    counts_after[w] -= 1
+                # 待张出现在自家河牌里 → 永久振听
+                discarded_ids = {t.tile_id for t in state.discards[seat]}
+                if current_waits & discarded_ids:
+                    state.furiten[seat] = True
 
         tile_idx = tile.tile_id if not tile.is_aka else {4: 34, 13: 35, 22: 36}[tile.tile_id]
         discard_base = PROG_DISCARD_TSUMOGIRI_BASE if tsumogiri else PROG_DISCARD_BASE
@@ -325,8 +339,56 @@ class MjaiSimulator:
             view = state.player_view(seat)
             ann  = self._make_annotation(game_id, seat, view, state, cands, chosen)
             anns.append(ann)
-            
+
+        # ── 振听更新 2&3：对手打出了某玩家的待张但该玩家没有荣 ─────────────
+        # 遍历所有非打牌者，检查 pai 是否是他们的待张
+        self._update_furiten_on_others_discard(state, target, pai, reactions)
+
         return anns
+
+    def _update_furiten_on_others_discard(
+        self, state: GameState, discarder: int, pai: "Tile", reactions: dict
+    ) -> None:
+        """
+        对手（discarder）打出 pai 后，检查其他三家的振听状态：
+        - 如果 pai 是某家的待张且该家没有荣（也就是没有 RON 反应）：
+            - 非立直者 → 同巡临时振听（下次摸牌清除）
+            - 立直者   → 立直永久振听（之后都不能荣）
+        """
+        for seat in range(4):
+            if seat == discarder:
+                continue
+            # 已经永久振听的直接跳过
+            if state.furiten[seat] or state.furiten_riichi[seat]:
+                continue
+            hand = state.hands[seat]
+            if not hand:
+                continue
+            counts = hand_to_counts(hand)
+            mc = len(state.melds[seat])
+            n_tiles = sum(counts)
+            # 只有处于「等待荣和」状态的玩家才可能有振听
+            # 即：手牌 13 张（或副露后的等效张数）且 shanten==0
+            expected_tiles = 13 - 3 * mc
+            if n_tiles != expected_tiles:
+                continue
+            if calc_shanten(counts, mc) != 0:
+                continue
+            # 检查 pai 是否是该家的待张
+            counts[pai.tile_id] += 1
+            is_wait = (calc_shanten(counts, mc) == -1)
+            counts[pai.tile_id] -= 1
+            if not is_wait:
+                continue
+            # pai 是该家待张，但该家没有荣
+            if reactions.get(seat) == ActionType.RON:
+                continue
+            if state.in_riichi[seat]:
+                # 立直中：永久振听
+                state.furiten_riichi[seat] = True
+            else:
+                # 非立直：同巡临时振听
+                state.furiten_junme[seat] = True
 
     def _update_state_naki(self, event: dict, state: GameState):
         """Update state for naki (chi/pon/daiminkan) - annotations are handled post-discard"""
@@ -564,7 +626,7 @@ class MjaiSimulator:
 
         # 立直中：只能荣和，不能吃/碰/杠
         if state.in_riichi[seat]:
-            if not state.furiten[seat]:
+            if not state.is_furiten(seat):
                 test_counts = list(counts)
                 test_counts[pai.tile_id] += 1
                 sht = calc_shanten(test_counts, len(state.melds[seat]))
@@ -602,7 +664,7 @@ class MjaiSimulator:
                 tokens.append(CHI_OFFSET + chi_type_to_idx(suit, num + 1, 2))  # low=num+1 (1-based)
 
         # ── 荣和 ──────────────────────────────────────
-        if not state.furiten[seat]:
+        if not state.is_furiten(seat):
             test_counts = list(counts)
             test_counts[pai.tile_id] += 1
             sht = calc_shanten(test_counts, len(state.melds[seat]))
@@ -740,8 +802,10 @@ class MjaiSimulator:
         riichi_junme_abs = list(state.riichi_discard_idx)
         riichi_junme = _rot(riichi_junme_abs, seat)
 
-        # 振听：公开信息里只有立直振听是确定可知的
-        riichi_furiten = _rot(list(state.furiten), seat)
+        # 振听：存储综合振听状态（永久 | 立直永久 | 同巡临时）
+        riichi_furiten = _rot(
+            [state.is_furiten(s) for s in range(4)], seat
+        )
 
         return Annotation(
             game_id              = game_id,
@@ -782,7 +846,7 @@ class MjaiSimulator:
         for i in range(3):
             opp = (seat + i + 1) % 4
             opp_hand = state.hands[opp]
-            if not opp_hand or state.furiten[opp]:
+            if not opp_hand or state.is_furiten(opp):
                 result.append([])
                 continue
 
@@ -858,7 +922,7 @@ class MjaiSimulator:
                 continue
 
             # 对手已振听，无法荣和任何牌
-            if state.furiten[opp]:
+            if state.is_furiten(opp):
                 continue
 
             # 对手已立直：手牌固定，直接枚举待张，跳过 n_tiles 分支判断

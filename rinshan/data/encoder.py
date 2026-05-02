@@ -189,12 +189,11 @@ class GameEncoder:
                 belief_tokens_list.append(RIICHI_JUNME_OFFSET + seat * 9 + jbin)
             else:
                 belief_tokens_list.append(PAD_TOKEN)
-            # 振听 flag
-            is_furiten = riichi_furitens[seat] if riichi_furitens else False
-            if ann.riichi_declared[seat] and is_furiten:
-                belief_tokens_list.append(RIICHI_FURITEN_OFFSET + seat)
-            else:
-                belief_tokens_list.append(PAD_TOKEN)
+            # 振听 flag（TODO: simulator 振听判断逻辑有 bug，暂时禁用避免噪音）
+            # if ann.riichi_declared[seat] and is_furiten:
+            #     belief_tokens_list.append(RIICHI_FURITEN_OFFSET + seat)
+            # else:
+            belief_tokens_list.append(PAD_TOKEN)
         # 进行序列（公开，和主序列共享）
         belief_tokens_list.extend(prog_tokens)
         # 截断 + 填充（+12 for 立直上下文 4家×3 token）
