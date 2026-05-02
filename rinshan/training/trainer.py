@@ -359,8 +359,16 @@ class Trainer:
         # 定期日志
         if self.step % self.cfg.log_every == 0:
             lr = self.scheduler.get_last_lr()[0]
+            # 拼接 aux 分量（只在有值时显示）
+            aux_keys = ["action", "belief", "aux_shanten", "aux_tenpai_prob",
+                        "aux_deal_in_risk", "aux_opp_tenpai"]
+            aux_parts = "  ".join(
+                f"{k.replace('aux_','')}={loss_dict[k]:.3f}"
+                for k in aux_keys if k in loss_dict
+            )
             logger.info(
                 f"[step {self.step}] loss={loss_dict['total']:.4f}  lr={lr:.2e}"
+                + (f"  | {aux_parts}" if aux_parts else "")
             )
 
         # 定期保存
