@@ -50,6 +50,7 @@ import math
 import sys
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 import torch
 
@@ -243,18 +244,279 @@ def _save_rust_results(results, output_dir: str, compress: bool) -> None:
     print(f"[+] 已保存 {len(results)} 局对局 → {out_path}")
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# MJAI → tenhou.net/6 格式转换器
+# 参考：Equim-chan/mjai-reviewer convlog/src/tenhou/tile.rs + json_scheme.rs
+# ─────────────────────────────────────────────────────────────────────────────
+
+# MJAI tile string → 天凤数字编码
+_MJAI_TO_TENHOU: dict[str, int] = {
+    # 万子 11-19
+    **{f"{n}m": 10 + n for n in range(1, 10)},
+    # 筒子 21-29
+    **{f"{n}p": 20 + n for n in range(1, 10)},
+    # 索子 31-39
+    **{f"{n}s": 30 + n for n in range(1, 10)},
+    # 字牌 41-47（MJAI 标准名）
+    "E": 41, "S": 42, "W": 43, "N": 44,
+    "P": 45, "F": 46, "C": 47,
+    # 字牌 41-47（1z-7z 写法，我们引擎用）
+    "1z": 41, "2z": 42, "3z": 43, "4z": 44,
+    "5z": 45, "6z": 46, "7z": 47,
+    # 赤五 51-53（标准名）
+    "5mr": 51, "5pr": 52, "5sr": 53,
+    # 赤五 51-53（0x 写法，我们引擎用）
+    "0m": 51, "0p": 52, "0s": 53,
+    "?": 0,
+}
+
+def _t(pai: str) -> int:
+    """MJAI tile string → 天凤数字"""
+    return _MJAI_TO_TENHOU.get(pai, 0)
+
+
+def _encode_naki_chi(actor: int, target: int, pai: str, consumed: list[str]) -> str:
+    """
+    吃牌 → 天凤 takes 字符串，格式：c{pai}{c0}{c1}
+    target 必须是 kamicha（(actor+3)%4）
+    c0/c1 是手牌中用的两张
+    """
+    return f"c{_t(pai):02d}{_t(consumed[0]):02d}{_t(consumed[1]):02d}"
+
+
+def _encode_naki_pon(actor: int, target: int, pai: str, consumed: list[str]) -> str:
+    """
+    碰牌 → 天凤 takes 字符串
+    格式根据 target 方向：
+      kamicha  (actor+3)%4 → p{pai}{c0}{c1}
+      toimen   (actor+2)%4 → {c0}p{pai}{c1}  (p在idx=2)
+      shimocha (actor+1)%4 → {c0}{c1}p{pai}  (p在idx=4)
+    """
+    p = _t(pai)
+    c0, c1 = _t(consumed[0]), _t(consumed[1])
+    rel = (target - actor) % 4
+    if rel == 3:   # kamicha
+        return f"p{p:02d}{c0:02d}{c1:02d}"
+    elif rel == 2: # toimen
+        return f"{c0:02d}p{p:02d}{c1:02d}"
+    else:          # shimocha rel==1
+        return f"{c0:02d}{c1:02d}p{p:02d}"
+
+
+def _encode_naki_daiminkan(actor: int, target: int, pai: str, consumed: list[str]) -> str:
+    """
+    大明杠 → 天凤 takes 字符串
+    格式根据 target 方向（与碰类似但用 m，4张）：
+      kamicha  → m{pai}{c0}{c1}{c2}
+      toimen   → {c0}m{pai}{c1}{c2}
+      shimocha → {c0}{c1}{c2}m{pai}
+    """
+    p = _t(pai)
+    cs = [_t(c) for c in consumed]
+    rel = (target - actor) % 4
+    if rel == 3:   # kamicha
+        return f"m{p:02d}{cs[0]:02d}{cs[1]:02d}{cs[2]:02d}"
+    elif rel == 2: # toimen
+        return f"{cs[0]:02d}m{p:02d}{cs[1]:02d}{cs[2]:02d}"
+    else:          # shimocha
+        return f"{cs[0]:02d}{cs[1]:02d}{cs[2]:02d}m{p:02d}"
+
+
+def _encode_naki_kakan(actor: int, pai: str, consumed: list[str]) -> str:
+    """
+    加杠 → 天凤 discards 字符串（格式同碰，但用 k）
+    consumed[0..2] 是已碰的三张，consumed 里的 target 信息需从原碰牌方向推断。
+    我们这里用最简单的：从 mjai 的 consumed 判断哪张是「来自对家」。
+    天凤格式：
+      previously pon from kamicha  → k{pai}{c0}{c1}{c2}
+      previously pon from toimen   → {c0}k{pai}{c1}{c2}
+      previously pon from shimocha → {c0}{c1}k{c2}{pai} (k在idx=4)
+    实际上加杠时 mjai 没有给出原碰方向，用 idx=0 (kamicha) 作为默认即可，
+    viewer 只需要知道是杠，不会影响回放正确性。
+    """
+    p = _t(pai)
+    cs = [_t(c) for c in consumed]
+    # 天凤格式 k 在 idx=0 位置（previously pon from kamicha）
+    return f"k{p:02d}{cs[0]:02d}{cs[1]:02d}{cs[2]:02d}"
+
+
+def _encode_naki_ankan(actor: int, consumed: list[str]) -> str:
+    """
+    暗杠 → 天凤 discards 字符串
+    格式：{c0}{c1}{c2}a{c3}  （a 固定在 idx=6）
+    """
+    cs = [_t(c) for c in consumed]
+    return f"{cs[0]:02d}{cs[1]:02d}{cs[2]:02d}a{cs[3]:02d}"
+
+
+def mjai_events_to_tenhou(events: list[dict]) -> dict[str, Any]:
+    """
+    把一局完整的 MJAI 事件列表（含 start_game … end_game）
+    转换为 tenhou.net/6 JSON 格式的 dict。
+
+    tenhou.net/6 格式（参考 mjai-reviewer/convlog/src/tenhou/json_scheme.rs）：
+    {
+      "title": ["", ""],
+      "name": [p0, p1, p2, p3],
+      "rule": {"disp": "般南喰赤", "aka": 1},
+      "log": [
+        [                             ← 一局
+          [kyoku_num, honba, kyotaku],
+          [score0, score1, score2, score3],
+          [dora_num, ...],            ← dora indicators
+          [ura_num, ...],             ← ura indicators（和了后填）
+          [haipai_0...],  [takes_0...],  [discards_0...],
+          [haipai_1...],  [takes_1...],  [discards_1...],
+          [haipai_2...],  [takes_2...],  [discards_2...],
+          [haipai_3...],  [takes_3...],  [discards_3...],
+          results         ← ["和了", deltas, [who,target,...]] or ["流局", deltas]
+        ],
+        ...
+      ]
+    }
+    """
+    names = ["Player0", "Player1", "Player2", "Player3"]
+    kyoku_logs: list[list[Any]] = []
+
+    # ── 解析 start_game ──────────────────────────────────────────
+    for ev in events:
+        if ev.get("type") == "start_game":
+            names = list(ev.get("names", names))
+            break
+
+    # ── 逐局解析 ─────────────────────────────────────────────────
+    i = 0
+    while i < len(events):
+        ev = events[i]
+        if ev.get("type") != "start_kyoku":
+            i += 1
+            continue
+
+        # --- start_kyoku 字段 ---
+        bakaze_map = {"E": 0, "S": 4, "W": 8, "N": 12}
+        bakaze_off = bakaze_map.get(ev.get("bakaze", "E"), 0)
+        kyoku_in_wind = ev.get("kyoku", 1) - 1   # 0-based
+        kyoku_num = bakaze_off + kyoku_in_wind     # 天凤 kyoku_num
+        honba    = ev.get("honba", 0)
+        kyotaku  = ev.get("kyotaku", 0)
+        scores   = list(ev.get("scores", [25000]*4))
+        haipai   = [list(h) for h in ev.get("tehais", [[]]*4)]  # list[list[str]]
+        dora_ind = [_t(ev.get("dora_marker", "?"))]
+        ura_ind:  list[int] = []
+
+        # --- 每家的 takes / discards ---
+        takes:    list[list[Any]] = [[], [], [], []]
+        discards: list[list[Any]] = [[], [], [], []]
+
+        # --- 结算 ---
+        results: list[Any] = []
+        pending_reach: list[bool] = [False, False, False, False]
+
+        i += 1
+        while i < len(events):
+            ev = events[i]
+            t_type = ev.get("type", "")
+            i += 1
+
+            if t_type == "end_kyoku":
+                break
+
+            actor = ev.get("actor", 0)
+
+            if t_type == "tsumo":
+                takes[actor].append(_t(ev["pai"]))
+
+            elif t_type == "dahai":
+                if pending_reach[actor]:
+                    # reach 后的第一张打牌 → 合并为 "r{pai}" 写入 discards
+                    pai_num = 60 if ev.get("tsumogiri", False) else _t(ev["pai"])
+                    discards[actor].append(f"r{pai_num:02d}")
+                    pending_reach[actor] = False
+                elif ev.get("tsumogiri", False):
+                    discards[actor].append(60)
+                else:
+                    discards[actor].append(_t(ev["pai"]))
+
+            elif t_type == "reach":
+                # reach 本身不写入 discards，仅标记等待下一张打牌
+                pending_reach[actor] = True
+
+            elif t_type == "reach_accepted":
+                pass  # 天凤格式不单独记录
+
+            elif t_type == "chi":
+                takes[actor].append(
+                    _encode_naki_chi(actor, ev["target"], ev["pai"], ev["consumed"])
+                )
+
+            elif t_type == "pon":
+                takes[actor].append(
+                    _encode_naki_pon(actor, ev["target"], ev["pai"], ev["consumed"])
+                )
+
+            elif t_type == "daiminkan":
+                takes[actor].append(
+                    _encode_naki_daiminkan(actor, ev["target"], ev["pai"], ev["consumed"])
+                )
+
+            elif t_type == "kakan":
+                discards[actor].append(
+                    _encode_naki_kakan(actor, ev["pai"], ev["consumed"])
+                )
+
+            elif t_type == "ankan":
+                discards[actor].append(
+                    _encode_naki_ankan(actor, ev["consumed"])
+                )
+
+            elif t_type == "dora":
+                dora_ind.append(_t(ev["dora_marker"]))
+
+            elif t_type == "hora":
+                deltas = list(ev.get("deltas", [0, 0, 0, 0]))
+                who    = ev["actor"]
+                target = ev["target"]
+                ura_markers = ev.get("ura_markers", [])
+                ura_ind.extend(_t(u) for u in ura_markers)
+                if not results:
+                    results.append("和了")
+                results.append(deltas)
+                results.append([who, target])
+
+            elif t_type == "ryukyoku":
+                deltas = list(ev.get("deltas", [0, 0, 0, 0]))
+                results = ["流局", deltas]
+
+        # haipai 数字化
+        haipai_num = [[_t(p) for p in h] for h in haipai]
+
+        kyoku_entry: list[Any] = [
+            [kyoku_num, honba, kyotaku],
+            scores,
+            dora_ind,
+            ura_ind,
+            haipai_num[0], takes[0], discards[0],
+            haipai_num[1], takes[1], discards[1],
+            haipai_num[2], takes[2], discards[2],
+            haipai_num[3], takes[3], discards[3],
+            results,
+        ]
+        kyoku_logs.append(kyoku_entry)
+
+    return {
+        "title": ["", ""],
+        "name": names,
+        "rule": {"disp": "般南喰赤", "aka": 1},
+        "log": kyoku_logs,
+    }
+
+
 def _collect_mjson(log_dir: str, output_dir: str, n_games: int, label: str = "game") -> None:
     """
-    把 Rust log_dir 里的 .json.gz 转存为 tenhou.net/6 的 .mjson 文件。
-
-    Rust 输出格式：{seed_nonce}_{seed_key}_a.json.gz / _b.json.gz
-    （TwoVsTwo 一局两个视角文件，SelfPlay 只有 _a）
-    文件内已是完整 MJAI 事件流（start_game … end_game），
-    每行一个 JSON，只需解压后直接输出即可，无需任何转换。
-
+    把 Rust log_dir 里的 .json.gz 转换为 tenhou.net/6 JSON 格式并保存。
+    同时也保留一份 MJAI 格式（.mjai 后缀）。
     多局时建子文件夹；单局时直接放在 output_dir 下。
     """
-    import shutil
     src_dir = Path(log_dir)
     out_dir = Path(output_dir)
 
@@ -264,43 +526,50 @@ def _collect_mjson(log_dir: str, output_dir: str, n_games: int, label: str = "ga
         return
 
     # 每局 Rust 可能产生 _a / _b 两个文件（TwoVsTwo），取 _a 即可（全知视角一致）
-    # 用 stem 去掉 _a/_b 后缀分组
     seen_stems: set[str] = set()
     mjson_files: list[Path] = []
     for gz in gz_files:
-        stem = gz.stem.replace(".json", "")   # 去掉 .json（gz.stem = xxx.json）
-        base = stem.rstrip("_ab").rstrip("_") # 去掉 _a / _b
+        stem = gz.stem.replace(".json", "")
+        base = stem.rstrip("_ab").rstrip("_")
         if base not in seen_stems:
             seen_stems.add(base)
-            mjson_files.append(gz)            # 每局只取第一个视角文件
+            mjson_files.append(gz)
 
     multi = len(mjson_files) > 1
     if multi:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        dest_dir  = out_dir / f"mjson_{label}_{timestamp}"
+        dest_dir  = out_dir / f"tenhou_{label}_{timestamp}"
         dest_dir.mkdir(parents=True, exist_ok=True)
     else:
         dest_dir = out_dir
         dest_dir.mkdir(parents=True, exist_ok=True)
 
     for idx, gz_path in enumerate(mjson_files):
-        if multi:
-            out_name = f"{label}_{idx:04d}.mjson"
-        else:
-            out_name = f"{label}.mjson"
-        out_path = dest_dir / out_name
+        base_name = f"{label}_{idx:04d}" if multi else label
+        tenhou_path = dest_dir / f"{base_name}.json"
+        mjai_path   = dest_dir / f"{base_name}.mjai"
 
-        # 解压 → 包成 JSON 数组（tenhou.net/6 要求整个文件是 JSON array）
         with gzip.open(gz_path, "rt", encoding="utf-8") as src:
             events = [json.loads(ln) for ln in src if ln.strip()]
-        with open(out_path, "w", encoding="utf-8") as dst:
-            dst.write(json.dumps(events, ensure_ascii=False))
+
+        # 保存 MJAI 格式（每行一个 JSON，原始格式）
+        with open(mjai_path, "w", encoding="utf-8") as f:
+            for ev in events:
+                f.write(json.dumps(ev, ensure_ascii=False) + "\n")
+
+        # 转换并保存 tenhou.net/6 格式
+        tenhou_data = mjai_events_to_tenhou(events)
+        with open(tenhou_path, "w", encoding="utf-8") as f:
+            json.dump(tenhou_data, f, ensure_ascii=False)
 
     if multi:
-        print(f"[+] 已导出 {len(mjson_files)} 局 mjson → {dest_dir}/")
+        print(f"[+] 已导出 {len(mjson_files)} 局 → {dest_dir}/")
+        print(f"    tenhou.net/6 格式: {label}_XXXX.json")
+        print(f"    MJAI 格式:         {label}_XXXX.mjai")
     else:
-        print(f"[+] 已导出 mjson → {list(dest_dir.glob('*.mjson'))[0]}")
-    print(f"    上传地址：https://tenhou.net/6/  （将 .mjson 拖入页面即可回放）")
+        print(f"[+] 已导出 tenhou格式 → {dest_dir / (label + '.json')}")
+        print(f"    MJAI格式         → {dest_dir / (label + '.mjai')}")
+    print(f"    上传地址：https://tenhou.net/6/  （将 .json 拖入页面即可回放）")
 
 
 def evaluate_versus_strength(args, log_dir_override=None) -> dict:
@@ -694,35 +963,50 @@ def main():
 
 def _export_python_mjson(records, output_dir: str) -> None:
     """
-    Python Arena 路径的 mjson 导出。
-    kyoku_logs 已是 MJAI 事件列表，首尾加 start_game / end_game 即可。
+    Python Arena 路径的导出。
+    同时输出两种格式：
+      .json  → tenhou.net/6 天凤格式（可直接拖入页面回放）
+      .mjai  → MJAI 原始格式（每行一个 JSON）
     """
     out_dir = Path(output_dir)
     multi = len(records) > 1
     if multi:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        dest_dir  = out_dir / f"mjson_selfplay_{timestamp}"
+        dest_dir  = out_dir / f"tenhou_selfplay_{timestamp}"
         dest_dir.mkdir(parents=True, exist_ok=True)
     else:
         dest_dir = out_dir
         dest_dir.mkdir(parents=True, exist_ok=True)
 
     for idx, rec in enumerate(records):
-        out_name = f"game_{idx:04d}.mjson" if multi else "game.mjson"
-        out_path = dest_dir / out_name
-        # 拼装事件列表，包成 JSON 数组（tenhou.net/6 要求整个文件是 JSON array）
-        events = [{"type": "start_game", "id": 0, "names": rec.agent_names}]
+        base_name = f"game_{idx:04d}" if multi else "game"
+        tenhou_path = dest_dir / f"{base_name}.json"
+        mjai_path   = dest_dir / f"{base_name}.mjai"
+
+        # 展开成 MJAI 事件列表
+        events: list[dict] = [{"type": "start_game", "id": 0, "names": rec.agent_names}]
         for kyoku_events in rec.kyoku_logs:
             events.extend(kyoku_events)
         events.append({"type": "end_game", "scores": rec.final_scores})
-        with open(out_path, "w", encoding="utf-8") as f:
-            f.write(json.dumps(events, ensure_ascii=False))
+
+        # 保存 MJAI 格式（每行一个 JSON）
+        with open(mjai_path, "w", encoding="utf-8") as f:
+            for ev in events:
+                f.write(json.dumps(ev, ensure_ascii=False) + "\n")
+
+        # 转换并保存 tenhou.net/6 格式
+        tenhou_data = mjai_events_to_tenhou(events)
+        with open(tenhou_path, "w", encoding="utf-8") as f:
+            json.dump(tenhou_data, f, ensure_ascii=False)
 
     if multi:
-        print(f"[+] 已导出 {len(records)} 局 mjson → {dest_dir}/")
+        print(f"[+] 已导出 {len(records)} 局 → {dest_dir}/")
+        print(f"    tenhou.net/6 格式: game_XXXX.json")
+        print(f"    MJAI 格式:         game_XXXX.mjai")
     else:
-        print(f"[+] 已导出 mjson → {dest_dir / ('game_0000.mjson' if False else 'game.mjson')}")
-    print(f"    上传地址：https://tenhou.net/6/  （将 .mjson 拖入页面即可回放）")
+        print(f"[+] 已导出 tenhou格式 → {dest_dir / 'game.json'}")
+        print(f"    MJAI格式         → {dest_dir / 'game.mjai'}")
+    print(f"    上传地址：https://tenhou.net/6/  （将 .json 拖入页面即可回放）")
 
 
 if __name__ == "__main__":
