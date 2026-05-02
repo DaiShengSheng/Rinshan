@@ -66,12 +66,6 @@ def stage1_loss(
             tgt = aux_targets[k]
             if k == "shanten":
                 a_loss = F.cross_entropy(pred, tgt.long())
-            elif k == "deal_in_risk":
-                # 正例稀疏（~5%），pos_weight 补偿类别不均衡
-                pw = torch.tensor(8.0, device=pred.device, dtype=pred.dtype)
-                a_loss = F.binary_cross_entropy_with_logits(
-                    pred, tgt.float(), pos_weight=pw
-                )
             else:
                 a_loss = F.binary_cross_entropy_with_logits(pred, tgt.float())
             w = AUX_WEIGHTS.get(k, 0.1)

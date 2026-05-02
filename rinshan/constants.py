@@ -212,7 +212,7 @@ DEFAULT_TOP_P       = 0.9
 AUX_WEIGHTS = {
     "shanten":      0.10,
     "tenpai_prob":  0.10,
-    "deal_in_risk": 0.50,  # Label B：对手待张集合（复盘四家手牌可见，精确计算）
+    "deal_in_risk": 0.30,  # Label B：对手待张集合（复盘四家手牌可见，精确计算）
     "opp_tenpai":   0.10,
 }
 
