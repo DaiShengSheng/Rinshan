@@ -19,7 +19,7 @@ import torch.nn.functional as F
 
 from rinshan.constants import (
     NUM_TILE_TYPES, VOCAB_SIZE, PAD_TOKEN,
-    BELIEF_DIM, BELIEF_LAYERS, BELIEF_HEADS, BELIEF_OUTPUT_DIM,
+    BELIEF_DIM, BELIEF_LAYERS, BELIEF_HEADS, BELIEF_OUTPUT_DIM, WAIT_OUTPUT_DIM,
     MAX_PROGRESSION_LEN,
 )
 
@@ -43,7 +43,7 @@ class BeliefNetwork(nn.Module):
         n_heads: int = BELIEF_HEADS,
         n_layers: int = BELIEF_LAYERS,
         dropout: float = 0.1,
-        max_seq_len: int = MAX_PROGRESSION_LEN + 20,
+        max_seq_len: int = MAX_PROGRESSION_LEN + 20 + 12,  # 145：+12 立直上下文
     ):
         super().__init__()
         self.dim = dim
@@ -73,12 +73,22 @@ class BeliefNetwork(nn.Module):
         )
         self.norm = nn.LayerNorm(dim)
 
-        # 输出头：从 CLS hidden state 预测每张牌在三个对手手里的概率
+        # 手牌信念输出头：预测每张牌在三个对手手里的概率
         self.belief_head = nn.Sequential(
             nn.Linear(dim, dim),
             nn.GELU(),
             nn.Dropout(dropout),
             nn.Linear(dim, BELIEF_OUTPUT_DIM),  # 34 * 3 = 102
+        )
+
+        # 待张预测头：预测三个对手各自的待张牌
+        # 覆盖场景：立直/默听/副露听牌，统一作为概率分布学习
+        # 训练时只对对手处于 tenpai 的位置计算 loss，非 tenpai 时自动 mask
+        self.wait_head = nn.Sequential(
+            nn.Linear(dim, dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(dim, WAIT_OUTPUT_DIM),    # 34 * 3 = 102
         )
 
         self._init_weights()
@@ -97,13 +107,13 @@ class BeliefNetwork(nn.Module):
         tokens: torch.Tensor,                      # (B, S) int, public-state token sequence
         pad_mask: Optional[torch.Tensor] = None,   # (B, S) bool, True = pad position
         known_absent: Optional[torch.Tensor] = None, # (B, 34, 3) bool, True = tile definitely absent
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Returns:
-          cls_vec:      (B, BELIEF_DIM)     — global summary (used as a fallback / for BCE loss)
-          belief_probs: (B, 34, 3)          — per-tile per-opponent probabilities
-          memory:       (B, S+1, BELIEF_DIM) — full encoder hidden states including CLS
-                          used by PolicyTransformer cross-attention
+          cls_vec:       (B, BELIEF_DIM)      — global summary
+          belief_logits: (B, 34, 3)           — per-tile per-opponent logits（手牌预测）
+          wait_logits:   (B, 34, 3)           — per-tile per-opponent logits（待张预测）
+          memory:        (B, S+1, BELIEF_DIM) — full encoder hidden states for cross-attention
         """
         B, S = tokens.shape
 
@@ -142,14 +152,18 @@ class BeliefNetwork(nn.Module):
         if known_absent is not None:
             belief_logits = belief_logits.masked_fill(known_absent, float('-inf'))
 
-        # 返回 logits（不再内部做 sigmoid），供 loss 用 BCEWithLogits 计算，数字更稳定且 autocast 安全
-        # 推理时如需概率值，在外部手动调用 torch.sigmoid(belief_logits)
+        # 待张预测
+        wait_logits = self.wait_head(cls_vec)              # (B, 102)
+        wait_logits = wait_logits.view(B, NUM_TILE_TYPES, 3)  # (B, 34, 3)
+
+        # 返回 logits（不再内部做 sigmoid）供 loss 用 BCEWithLogits 计算
         belief_logits_out = belief_logits  # (B, 34, 3)
+        wait_logits_out   = wait_logits    # (B, 34, 3)
 
         # Return the full hidden-state sequence as cross-attention memory
         memory = x   # (B, S+1, BELIEF_DIM)
 
-        return cls_vec, belief_logits_out, memory
+        return cls_vec, belief_logits_out, wait_logits_out, memory
 
     def compute_loss(
         self,

@@ -26,6 +26,8 @@ from rinshan.constants import (
     RIICHI_TOKEN, TSUMO_AGARI_TOKEN, RON_AGARI_TOKEN, RYUKYOKU_TOKEN, PASS_TOKEN,
     WIND_OFFSET, ROUND_OFFSET, GAME_START_TOKEN, ROUND_START_TOKEN, PAD_TOKEN,
     HONBA_OFFSET, KYOTAKU_OFFSET, TILES_OFFSET,
+    # 立直上下文 token
+    RIICHI_JUNME_OFFSET, RIICHI_FURITEN_OFFSET,
     # 进行 token
     PROG_DISCARD_BASE, PROG_DISCARD_TSUMOGIRI_BASE,
     PROG_DRAW_BASE, PROG_RIICHI_BASE,
@@ -160,19 +162,43 @@ class GameEncoder:
         belief_tokens_list: list[int] = []
         # META + DORA（直接复用上面的）
         belief_tokens_list.extend(tokens_list[:dora_start + MAX_DORA_LEN])
-        # 四家副露和河牌（公开信息）
+        # 四家副露（公开信息）
         for seat in range(4):
             seat_melds = ann.melds[seat] if seat < len(ann.melds) else []
             for meld in seat_melds[:4]:
                 for tile in meld[1][:4]:
                     belief_tokens_list.append(tile_to_token(tile))
-        # 四家立直状态
+        # 四家立直状态（简单 0/1 flag）
         for rch in ann.riichi_declared:
             belief_tokens_list.append(RIICHI_TOKEN if rch else PAD_TOKEN)
+        # 立直上下文：宣言牌 + 宣言巡目 + 振听（每家最多 3 个 token）
+        riichi_discard_tiles = getattr(ann, 'riichi_discard_tile', [None]*4)
+        riichi_junmes        = getattr(ann, 'riichi_junme',         [-1]*4)
+        riichi_furitens      = getattr(ann, 'riichi_furiten',       [False]*4)
+        for seat in range(4):
+            # 宣言牌（已立直且有记录时）
+            rdtile = riichi_discard_tiles[seat] if riichi_discard_tiles else None
+            if rdtile is not None and ann.riichi_declared[seat]:
+                belief_tokens_list.append(tile_to_token(rdtile))
+            else:
+                belief_tokens_list.append(PAD_TOKEN)
+            # 宣言巡目分桶：-1=未立直 → PAD；0~8 bin → RIICHI_JUNME_OFFSET + seat*9 + bin
+            junme = riichi_junmes[seat] if riichi_junmes else -1
+            if junme >= 0 and ann.riichi_declared[seat]:
+                jbin = min(junme // 2, 8)   # 每 2 巡一档，共 9 档
+                belief_tokens_list.append(RIICHI_JUNME_OFFSET + seat * 9 + jbin)
+            else:
+                belief_tokens_list.append(PAD_TOKEN)
+            # 振听 flag
+            is_furiten = riichi_furitens[seat] if riichi_furitens else False
+            if ann.riichi_declared[seat] and is_furiten:
+                belief_tokens_list.append(RIICHI_FURITEN_OFFSET + seat)
+            else:
+                belief_tokens_list.append(PAD_TOKEN)
         # 进行序列（公开，和主序列共享）
         belief_tokens_list.extend(prog_tokens)
-        # 截断 + 填充
-        max_belief_len = MAX_PROGRESSION_LEN + 20
+        # 截断 + 填充（+12 for 立直上下文 4家×3 token）
+        max_belief_len = MAX_PROGRESSION_LEN + 20 + 12
         belief_tokens_list = belief_tokens_list[:max_belief_len]
         belief_pad_mask_list = [tok == PAD_TOKEN for tok in belief_tokens_list]
         while len(belief_tokens_list) < max_belief_len:
@@ -197,6 +223,18 @@ class GameEncoder:
                 "deal_in_risk": a.deal_in_risk,
                 "opp_tenpai":   [float(x) for x in a.opp_tenpai],
             }
+            # 待张标签：(34, 3) float binary，只有对手处于 tenpai 时有意义
+            if a.opp_wait_tiles is not None:
+                wait_arr = np.zeros((NUM_TILE_TYPES, 3), dtype=np.float32)
+                for opp_idx, wait_list in enumerate(a.opp_wait_tiles[:3]):
+                    for tid in wait_list:
+                        if 0 <= tid < NUM_TILE_TYPES:
+                            wait_arr[tid, opp_idx] = 1.0
+                aux_targets["opp_wait_tiles"] = wait_arr
+                # tenpai mask：(3,) float——只对 tenpai 对手计算 wait loss
+                aux_targets["opp_tenpai_mask"] = np.array(
+                    [float(x) for x in a.opp_tenpai], dtype=np.float32
+                )
 
         return {
             "tokens":          torch.tensor(tokens_list,          dtype=torch.long),

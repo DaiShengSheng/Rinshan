@@ -1,0 +1,38 @@
+# Stage 1: 行为克隆 — RTX PRO 6000 96GB 专用
+# model: large (dim=1536, 24L, ~500M params)
+# 理论显存占用: ~55GB (batch=4096, bf16, grad_accum=1)
+# 有效 batch size: 4096
+
+stage: 1
+model_preset: large
+
+# 数据
+data_dir: data/annotated
+init_ckpt: checkpoints/stage1_base/stage1_migrated.pt  # 热启动（base→large 跨尺寸迁移权重）
+val_ratio: 0.02
+shuffle_buffer: 50000
+
+# 训练
+lr: 5e-5               # large 模型学习率适当降低
+weight_decay: 0.1
+warmup_steps: 4000
+total_steps: 300_000
+batch_size: 4096       # 96GB 可承载，有效 batch 即 4096
+grad_accum_steps: 1
+max_grad_norm: 1.0
+
+# 精度
+dtype: bfloat16
+amp: true
+compile: true
+
+# 保存 & 日志
+save_dir: checkpoints/stage1_pro6000
+save_every: 5000
+log_every: 100
+val_every: 5000
+
+# 设备
+device: cuda
+num_workers: 20        # 22核，留2给主进程
+pin_memory: true

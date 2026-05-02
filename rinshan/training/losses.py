@@ -22,43 +22,65 @@ from rinshan.constants import GAMMA, IQL_EXPECTILE, CQL_WEIGHT, DISTILL_TEMP
 def stage1_loss(
     q: torch.Tensor,              # (B, N) Q 值 logits
     action_idx: torch.Tensor,     # (B,) 人类选择的动作 index
-    belief_logits: Optional[torch.Tensor] = None,  # (B, 34, 3) raw logits
-    actual_hands: Optional[torch.Tensor] = None,  # (B, 34, 3) 真实手牌
+    belief_logits: Optional[torch.Tensor] = None,  # (B, 34, 3) 手牌 logits
+    wait_logits: Optional[torch.Tensor] = None,    # (B, 34, 3) 待张 logits
+    actual_hands: Optional[torch.Tensor] = None,   # (B, 34, 3) 真实手牌
+    opp_wait_tiles: Optional[torch.Tensor] = None, # (B, 34, 3) 真实待张
+    opp_tenpai_mask: Optional[torch.Tensor] = None,# (B, 3) tenpai 掩码
     aux_preds: Optional[dict]     = None,
     aux_targets: Optional[dict]   = None,
     belief_weight: float = 0.3,
-    aux_weight: float   = 1.0,
+    wait_weight: float   = 0.15,
+    aux_weight: float    = 1.0,
 ) -> tuple[torch.Tensor, dict]:
     """
     行为克隆（模仿学习）损失
 
     主损失：CrossEntropy(Q logits, 人类选择的动作)
-    辅助：Belief BCE + AuxHead losses
-
-    注意权重体系：
-      belief loss 权重 = belief_weight（默认 0.3）
-      aux task 权重   = aux_weight（默认 1.0）× AUX_WEIGHTS[task_name]
-      例：shanten 实际权重 = 1.0 × 0.1 = 0.1
+    辅助：
+      belief loss  — 手牌预测 BCE，权重 belief_weight
+      wait loss    — 待张预测 BCE（只对 tenpai 对手），权重 wait_weight
+      aux losses   — 各辅助任务，权重 aux_weight × AUX_WEIGHTS[k]
     """
     losses = {}
 
-    # 主损失：模仿人类动作
+    # 主损失
     action_loss = F.cross_entropy(q, action_idx)
     losses["action"] = action_loss.item()
-
     total = action_loss
 
-    # Belief 损失（BCEWithLogitsLoss：autocast 安全且数值更稳定）
+    # 手牌 Belief 损失
     if belief_logits is not None and actual_hands is not None:
         target = (actual_hands > 0).float()
         b_loss = F.binary_cross_entropy_with_logits(belief_logits, target)
         losses["belief"] = b_loss.item()
         total = total + belief_weight * b_loss
 
+    # 待张预测损失（只对处于 tenpai 的对手计算）
+    if wait_logits is not None and opp_wait_tiles is not None:
+        # wait_logits:    (B, 34, 3)
+        # opp_wait_tiles: (B, 34, 3)
+        # opp_tenpai_mask:(B, 3)  — 1 = 该对手处于 tenpai
+        if opp_tenpai_mask is not None:
+            # 将 mask 广播到 (B, 34, 3)：只有 tenpai 对手的 tile 维度参与 loss
+            mask = opp_tenpai_mask.unsqueeze(1).expand_as(wait_logits)  # (B, 34, 3)
+            # 有 tenpai 对手的样本才计算
+            if mask.any():
+                w_loss = F.binary_cross_entropy_with_logits(
+                    wait_logits[mask.bool()],
+                    opp_wait_tiles[mask.bool()].float(),
+                )
+                losses["wait"] = w_loss.item()
+                total = total + wait_weight * w_loss
+        else:
+            w_loss = F.binary_cross_entropy_with_logits(
+                wait_logits, opp_wait_tiles.float()
+            )
+            losses["wait"] = w_loss.item()
+            total = total + wait_weight * w_loss
+
     # 辅助任务损失
     if aux_preds is not None and aux_targets is not None:
-        from rinshan.model.aux_head import AuxHeads
-        # 调用 AuxHeads.compute_loss（静态方式）
         from rinshan.constants import AUX_WEIGHTS
         for k, pred in aux_preds.items():
             if k not in aux_targets:

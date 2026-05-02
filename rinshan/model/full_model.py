@@ -30,8 +30,10 @@ class RinshanOutput:
     q_hand:       torch.Tensor             # (B, MAX_CANDIDATES)  局内价值分支 Q
     v_game:       torch.Tensor             # (B,) 整场状态价值
     v_hand:       torch.Tensor             # (B,) 局内状态价值
-    belief_probs:  Optional[torch.Tensor]   # (B, 34, 3)  信念概率（已 sigmoid，供推理）
-    belief_logits: Optional[torch.Tensor]   # (B, 34, 3)  信念 logits（用于 BCE loss）
+    belief_probs:  Optional[torch.Tensor]  # (B, 34, 3)  手牌信念概率（已 sigmoid，供推理）
+    belief_logits: Optional[torch.Tensor]  # (B, 34, 3)  手牌信念 logits（用于 BCE loss）
+    wait_logits:   Optional[torch.Tensor]  # (B, 34, 3)  待张预测 logits
+    wait_probs:    Optional[torch.Tensor]  # (B, 34, 3)  待张概率（已 sigmoid，供推理）
     belief_vec:   Optional[torch.Tensor]   # (B, BELIEF_DIM)  信念向量
     aux_preds:    Optional[dict]           # 辅助任务预测
     encode:       torch.Tensor             # (B, S, dim)  Transformer 输出（供 loss 计算）
@@ -77,11 +79,12 @@ class RinshanModel(nn.Module):
     ) -> RinshanOutput:
 
         # ── Belief Network ──────────────────────────────────────────────
-        belief_vec     = None
-        belief_logits = None  # (B,34,3) raw logits; use sigmoid externally for probs
-        belief_memory = None   # (B, S_m, BELIEF_DIM) — full hidden states for cross-attn
+        belief_vec    = None
+        belief_logits = None
+        wait_logits   = None
+        belief_memory = None
         if self.belief_net is not None and belief_tokens is not None:
-            belief_vec, belief_logits, belief_memory = self.belief_net(
+            belief_vec, belief_logits, wait_logits, belief_memory = self.belief_net(
                 belief_tokens, belief_pad_mask, known_absent
             )
 
@@ -97,14 +100,13 @@ class RinshanModel(nn.Module):
             aux_preds = self.aux_heads(encode)
 
         return RinshanOutput(
-            q=q,
-            v=v,
-            q_game=q_game,
-            q_hand=q_hand,
-            v_game=v_game,
-            v_hand=v_hand,
+            q=q, v=v,
+            q_game=q_game, q_hand=q_hand,
+            v_game=v_game, v_hand=v_hand,
             belief_probs=torch.sigmoid(belief_logits) if belief_logits is not None else None,
             belief_logits=belief_logits,
+            wait_logits=wait_logits,
+            wait_probs=torch.sigmoid(wait_logits) if wait_logits is not None else None,
             belief_vec=belief_vec,
             aux_preds=aux_preds,
             encode=encode,

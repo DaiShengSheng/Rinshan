@@ -49,6 +49,7 @@ def _json_to_annotation(d: dict) -> Annotation:
             tenpai_prob  = float(a["tenpai_prob"]),
             deal_in_risk = a["deal_in_risk"],
             opp_tenpai   = a["opp_tenpai"],
+            opp_wait_tiles = a.get("opp_wait_tiles", None),
         )
 
     opp_hands = None
@@ -69,6 +70,12 @@ def _json_to_annotation(d: dict) -> Annotation:
         discards           = [_parse_tile_list(s) for s in d.get("discards", [[], [], [], []])],
         melds              = melds,
         riichi_declared    = d.get("riichi_declared", [False, False, False, False]),
+        riichi_discard_tile= [
+            Tile.from_id(t) if t is not None else None
+            for t in d.get("riichi_discard_tile", [None]*4)
+        ],
+        riichi_junme       = d.get("riichi_junme", [-1]*4),
+        riichi_furiten     = d.get("riichi_furiten", [False]*4),
         progression        = d["progression"],
         action_candidates  = d["action_candidates"],
         action_chosen      = d["action_chosen"],

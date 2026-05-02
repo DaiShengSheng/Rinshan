@@ -121,7 +121,14 @@ PROG_NEWDORA_BASE   = 1303   # 1303 - 1336 (34 tiles)
 # 避免插入中间导致所有 PROG_* offset 连锁偏移
 PROG_DISCARD_TSUMOGIRI_BASE = 1360  # 1360-1507: 摸切打牌（4 seats × 37 = 148）
 
-VOCAB_SIZE = 1508  # +148 摸切 PROG_DISCARD token
+# ── 立直上下文 token（Belief 序列专用）──
+# 立直巡目分桶：4 seats × 9 bins = 36 tokens
+#   bin = clamp(riichi_junme // 2, 0, 8)，约每 2 巡一档
+RIICHI_JUNME_OFFSET  = 1508  # 1508-1543
+# 立直振听 flag：4 seats
+RIICHI_FURITEN_OFFSET = 1544  # 1544-1547
+
+VOCAB_SIZE = 1548  # 扩展：+36 立直巡目 + 4 振听
 
 # ─────────────────────────────────────────────
 # 序列长度常量
@@ -177,6 +184,8 @@ BELIEF_HEADS    =   4
 
 # 输出：34 种牌 × 3 个对手 = 102 维的概率矩阵
 BELIEF_OUTPUT_DIM = NUM_TILE_TYPES * 3
+# 待张预测输出（同维度）
+WAIT_OUTPUT_DIM   = NUM_TILE_TYPES * 3
 
 # ─────────────────────────────────────────────
 # 模型规模预设
@@ -212,9 +221,12 @@ DEFAULT_TOP_P       = 0.9
 AUX_WEIGHTS = {
     "shanten":      0.10,
     "tenpai_prob":  0.10,
-    "deal_in_risk": 0.30,  # Label B：对手待张集合（复盘四家手牌可见，精确计算）
+    "deal_in_risk": 0.30,
     "opp_tenpai":   0.10,
 }
+
+# Belief 网络内部权重
+BELIEF_WAIT_WEIGHT = 0.5   # 待张预测损失权重（相对于手牌 belief loss）
 
 # ─────────────────────────────────────────────
 # GRP 常量

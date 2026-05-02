@@ -28,6 +28,9 @@ class AuxTargets:
     tenpai_prob:  float          # 0 / 1
     deal_in_risk: list[float]    # 34 维，每张牌的放铳危险度 0~1
     opp_tenpai:   list[int]      # 3 维，三个对手是否听牌 0/1
+    # 三个对手各自的待张 (3, 34) binary；只有对手处于 tenpai 时有意义
+    # None 表示本条样本没有该标签（数据源不支持或对手未听牌）
+    opp_wait_tiles: Optional[list[list[int]]] = None  # [opp0, opp1, opp2] × 34 binary
 
     @property
     def shanten_label(self) -> int:
@@ -57,6 +60,15 @@ class Annotation:
     discards:          list[list[Tile]]    # 四家河牌（旋转后 [0]=己方）
     melds:             list[list[tuple]]   # 四家副露，每个副露是 (type, tiles)
     riichi_declared:   list[bool]          # 四家是否立直宣言
+
+    # ── 立直上下文（公开信息，belief 用）──────
+    # riichi_discard_tile[i]: 第 i 家立直宣言时打出的那张牌（旋转后 [0]=己方）
+    #   None 表示该家未立直或数据不可用
+    riichi_discard_tile: list[Optional[Tile]] = field(default_factory=lambda: [None]*4)
+    # riichi_junme[i]: 第 i 家立直时已出了多少张牌（即宣言巡目，-1=未立直）
+    riichi_junme:        list[int]           = field(default_factory=lambda: [-1]*4)
+    # riichi_furiten[i]: 第 i 家是否在振听立直（公开可推断）
+    riichi_furiten:      list[bool]          = field(default_factory=lambda: [False]*4)
 
     # ── 进行序列（历史事件，按时间顺序）────
     progression:   list[int]               # 已编码的进行 token 序列
