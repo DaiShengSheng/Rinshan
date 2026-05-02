@@ -73,8 +73,8 @@ def parse_args():
                    help="运行模式：random=随机agent测试，ai=AI自对弈，versus=双模型对战")
     p.add_argument("--n_games",       type=int, default=4,
                    help="要生成的对局数量")
-    p.add_argument("--seed",          type=int, default=0,
-                   help="随机种子（用于局面生成）")
+    p.add_argument("--seed",          type=int, default=None,
+                   help="随机种子（用于局面生成）；不填则自动用当前时间戳，每次产生不同牌局")
     p.add_argument("--game_length",   choices=["hanchan", "tonpuu"],
                    default="hanchan", help="hanchan=半庄 tonpuu=东风")
     p.add_argument("--output",        type=str, default="data/self_play",
@@ -911,6 +911,12 @@ def main():
 
     if args.mode != "random" and not args.no_rust and not _libriichi_available():
         print("[!] libriichi 不可用，自动降级到 Python Arena")
+
+    # seed 未指定时用时间戳，保证每次配牌不同
+    if args.seed is None:
+        import time
+        args.seed = int(time.time()) & 0x7FFFFFFF
+        print(f"[+] 自动 seed={args.seed}（时间戳）")
 
     backend = "Rust libriichi" if use_rust else "Python Arena"
     print(f"[Rinshan] mode={args.mode}  n_games={args.n_games}  "
