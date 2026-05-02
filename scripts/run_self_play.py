@@ -108,6 +108,9 @@ def parse_args():
     # 日志 / 显示控制
     p.add_argument("--log_dir",       type=str, default=None,
                    help="保存每局 mjai 原始日志的目录（仅 Rust 后端 versus 模式支持，用于复盘调试）")
+    p.add_argument("--mjson",         action="store_true",
+                   help="将对局保存为 tenhou.net/6 可直接上传的 .mjson 格式；"
+                        "单局输出到 --output 目录，多局自动建子文件夹")
     p.add_argument("--quiet",         action="store_true")
     return p.parse_args()
 
@@ -240,7 +243,69 @@ def _save_rust_results(results, output_dir: str, compress: bool) -> None:
     print(f"[+] 已保存 {len(results)} 局对局 → {out_path}")
 
 
-def evaluate_versus_strength(args) -> dict:
+def _collect_mjson(log_dir: str, output_dir: str, n_games: int, label: str = "game") -> None:
+    """
+    把 Rust log_dir 里的 .json.gz 转存为 tenhou.net/6 的 .mjson 文件。
+
+    Rust 输出格式：{seed_nonce}_{seed_key}_a.json.gz / _b.json.gz
+    （TwoVsTwo 一局两个视角文件，SelfPlay 只有 _a）
+    文件内已是完整 MJAI 事件流（start_game … end_game），
+    每行一个 JSON，只需解压后直接输出即可，无需任何转换。
+
+    多局时建子文件夹；单局时直接放在 output_dir 下。
+    """
+    import shutil
+    src_dir = Path(log_dir)
+    out_dir = Path(output_dir)
+
+    gz_files = sorted(src_dir.glob("*.json.gz"))
+    if not gz_files:
+        print("[!] log_dir 中没有找到 .json.gz 文件，跳过 mjson 转存")
+        return
+
+    # 每局 Rust 可能产生 _a / _b 两个文件（TwoVsTwo），取 _a 即可（全知视角一致）
+    # 用 stem 去掉 _a/_b 后缀分组
+    seen_stems: set[str] = set()
+    mjson_files: list[Path] = []
+    for gz in gz_files:
+        stem = gz.stem.replace(".json", "")   # 去掉 .json（gz.stem = xxx.json）
+        base = stem.rstrip("_ab").rstrip("_") # 去掉 _a / _b
+        if base not in seen_stems:
+            seen_stems.add(base)
+            mjson_files.append(gz)            # 每局只取第一个视角文件
+
+    multi = len(mjson_files) > 1
+    if multi:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        dest_dir  = out_dir / f"mjson_{label}_{timestamp}"
+        dest_dir.mkdir(parents=True, exist_ok=True)
+    else:
+        dest_dir = out_dir
+        dest_dir.mkdir(parents=True, exist_ok=True)
+
+    for idx, gz_path in enumerate(mjson_files):
+        if multi:
+            out_name = f"{label}_{idx:04d}.mjson"
+        else:
+            out_name = f"{label}.mjson"
+        out_path = dest_dir / out_name
+
+        # 解压 → 逐行写出（保持每行一个 JSON 的 MJAI 格式）
+        with gzip.open(gz_path, "rt", encoding="utf-8") as src, \
+             open(out_path, "w", encoding="utf-8") as dst:
+            for line in src:
+                line = line.strip()
+                if line:
+                    dst.write(line + "\n")
+
+    if multi:
+        print(f"[+] 已导出 {len(mjson_files)} 局 mjson → {dest_dir}/")
+    else:
+        print(f"[+] 已导出 mjson → {list(dest_dir.glob('*.mjson'))[0]}")
+    print(f"    上传地址：https://tenhou.net/6/  （将 .mjson 拖入页面即可回放）")
+
+
+def evaluate_versus_strength(args, log_dir_override=None) -> dict:
     """返回对战汇总指标，供 Stage3 arena gate 使用。"""
     import time
     from rinshan.self_play.agent import RinshanAgent
@@ -261,7 +326,8 @@ def evaluate_versus_strength(args) -> dict:
     agent_bl = RinshanAgent(model_bl, name="bl", device=args.device,
                             temperature=args.temperature, top_p=args.top_p, greedy=args.greedy)
 
-    arena = TwoVsTwo(disable_progress_bar=args.quiet, log_dir=args.log_dir)
+    effective_log_dir = log_dir_override if log_dir_override is not None else args.log_dir
+    arena = TwoVsTwo(disable_progress_bar=args.quiet, log_dir=effective_log_dir)
     all_results = []
     generated = 0
     skipped = 0
@@ -333,7 +399,16 @@ def evaluate_versus_strength(args) -> dict:
 
 def run_rust_versus(args) -> None:
     """Rust TwoVsTwo 双模型对战（wave 循环，支持 --parallel_games）"""
-    summary, all_results = evaluate_versus_strength(args)
+    import tempfile, shutil
+
+    # mjson 模式：用临时目录接收 log_dir 输出，结束后转存
+    _tmp_log_dir = None
+    effective_log_dir = args.log_dir
+    if args.mjson:
+        _tmp_log_dir = tempfile.mkdtemp(prefix="rinshan_logdir_")
+        effective_log_dir = _tmp_log_dir
+
+    summary, all_results = evaluate_versus_strength(args, log_dir_override=effective_log_dir)
     delta = summary["delta_rank"]
     verdict = ("↑ Challenger 胜" if delta < -0.05
                 else "↓ Baseline 胜" if delta > 0.05
@@ -352,10 +427,14 @@ def run_rust_versus(args) -> None:
     print("="*58)
     _save_rust_results(all_results, args.output, args.compress)
 
+    if args.mjson and _tmp_log_dir:
+        _collect_mjson(_tmp_log_dir, args.output, summary["games"], label="versus")
+        shutil.rmtree(_tmp_log_dir, ignore_errors=True)
+
 
 def run_rust_selfplay(args) -> None:
     """Rust SelfPlay 单模型自对弈（wave 循环，支持 --parallel_games）"""
-    import time
+    import time, tempfile, shutil
     from rinshan.self_play.agent import RinshanAgent
     from libriichi.arena import SelfPlay
 
@@ -363,7 +442,14 @@ def run_rust_selfplay(args) -> None:
     agent = RinshanAgent(model, name="selfplay", device=args.device,
                          temperature=args.temperature, top_p=args.top_p, greedy=args.greedy)
 
-    arena       = SelfPlay(disable_progress_bar=args.quiet)
+    # mjson 模式：用临时目录接收 log_dir 输出
+    _tmp_log_dir = None
+    effective_log_dir = None
+    if args.mjson:
+        _tmp_log_dir = tempfile.mkdtemp(prefix="rinshan_logdir_")
+        effective_log_dir = _tmp_log_dir
+
+    arena       = SelfPlay(disable_progress_bar=args.quiet, log_dir=effective_log_dir)
     all_results = []
     generated   = 0
     skipped     = 0
@@ -438,6 +524,10 @@ def run_rust_selfplay(args) -> None:
     print("="*68)
 
     _save_rust_results(all_results, args.output, args.compress)
+
+    if args.mjson and _tmp_log_dir:
+        _collect_mjson(_tmp_log_dir, args.output, len(all_results), label="selfplay")
+        shutil.rmtree(_tmp_log_dir, ignore_errors=True)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -598,6 +688,52 @@ def main():
 
     out_path = save_records(records, args.output, args.compress)
     print(f"[+] 已保存 {len(records)} 局对局 → {out_path}")
+
+    # Python Arena mjson 导出（kyoku_logs 直接拼接）
+    if args.mjson:
+        _export_python_mjson(records, args.output)
+
+
+def _export_python_mjson(records, output_dir: str) -> None:
+    """
+    Python Arena 路径的 mjson 导出。
+    kyoku_logs 已是 MJAI 事件列表，首尾加 start_game / end_game 即可。
+    """
+    out_dir = Path(output_dir)
+    multi = len(records) > 1
+    if multi:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        dest_dir  = out_dir / f"mjson_selfplay_{timestamp}"
+        dest_dir.mkdir(parents=True, exist_ok=True)
+    else:
+        dest_dir = out_dir
+        dest_dir.mkdir(parents=True, exist_ok=True)
+
+    for idx, rec in enumerate(records):
+        out_name = f"game_{idx:04d}.mjson" if multi else "game.mjson"
+        out_path = dest_dir / out_name
+        with open(out_path, "w", encoding="utf-8") as f:
+            # start_game
+            f.write(json.dumps({
+                "type":  "start_game",
+                "id":    0,
+                "names": rec.agent_names,
+            }, ensure_ascii=False) + "\n")
+            # 逐局事件
+            for kyoku_events in rec.kyoku_logs:
+                for evt in kyoku_events:
+                    f.write(json.dumps(evt, ensure_ascii=False) + "\n")
+            # end_game
+            f.write(json.dumps({
+                "type":   "end_game",
+                "scores": rec.final_scores,
+            }, ensure_ascii=False) + "\n")
+
+    if multi:
+        print(f"[+] 已导出 {len(records)} 局 mjson → {dest_dir}/")
+    else:
+        print(f"[+] 已导出 mjson → {dest_dir / ('game_0000.mjson' if False else 'game.mjson')}")
+    print(f"    上传地址：https://tenhou.net/6/  （将 .mjson 拖入页面即可回放）")
 
 
 if __name__ == "__main__":
