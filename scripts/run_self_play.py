@@ -297,8 +297,16 @@ def evaluate_versus_strength(args) -> dict:
 
     ch_avg = sum(x + 1 for x in ch_ranks) / max(len(ch_ranks), 1)
     bl_avg = sum(x + 1 for x in bl_ranks) / max(len(bl_ranks), 1)
-    ch_first = sum(1 for x in ch_ranks if x == 0) / max(len(ch_ranks), 1)
-    bl_first = sum(1 for x in bl_ranks if x == 0) / max(len(bl_ranks), 1)
+    n_ch = max(len(ch_ranks), 1)
+    n_bl = max(len(bl_ranks), 1)
+    ch_first  = sum(1 for x in ch_ranks if x == 0) / n_ch
+    ch_second = sum(1 for x in ch_ranks if x == 1) / n_ch
+    ch_third  = sum(1 for x in ch_ranks if x == 2) / n_ch
+    ch_fourth = sum(1 for x in ch_ranks if x == 3) / n_ch
+    bl_first  = sum(1 for x in bl_ranks if x == 0) / n_bl
+    bl_second = sum(1 for x in bl_ranks if x == 1) / n_bl
+    bl_third  = sum(1 for x in bl_ranks if x == 2) / n_bl
+    bl_fourth = sum(1 for x in bl_ranks if x == 3) / n_bl
     ch_score = sum(ch_scores) / max(len(ch_scores), 1)
     bl_score = sum(bl_scores) / max(len(bl_scores), 1)
     delta = ch_avg - bl_avg
@@ -308,8 +316,14 @@ def evaluate_versus_strength(args) -> dict:
         "elapsed": elapsed,
         "challenger_avg_rank": ch_avg,
         "baseline_avg_rank": bl_avg,
-        "challenger_first_rate": ch_first,
-        "baseline_first_rate": bl_first,
+        "challenger_first_rate":  ch_first,
+        "challenger_second_rate": ch_second,
+        "challenger_third_rate":  ch_third,
+        "challenger_fourth_rate": ch_fourth,
+        "baseline_first_rate":    bl_first,
+        "baseline_second_rate":   bl_second,
+        "baseline_third_rate":    bl_third,
+        "baseline_fourth_rate":   bl_fourth,
         "challenger_avg_score": ch_score,
         "baseline_avg_score": bl_score,
         "delta_rank": delta,
@@ -327,8 +341,13 @@ def run_rust_versus(args) -> None:
     print(f"\n{'='*58}")
     print(f"对战完成  {summary['games']} 局 | 用时 {summary['elapsed']:.1f}s | 速度 {summary['games']/summary['elapsed']:.2f} 局/s")
     print(f"{'─'*58}")
-    print(f"Challenger  平均顺位 {summary['challenger_avg_rank']:.3f}  一位率 {summary['challenger_first_rate']*100:.1f}%  平均得分 {summary['challenger_avg_score']:.0f}")
-    print(f"Baseline    平均顺位 {summary['baseline_avg_rank']:.3f}  一位率 {summary['baseline_first_rate']*100:.1f}%  平均得分 {summary['baseline_avg_score']:.0f}")
+    def _rank_str(s, prefix):
+        return (f"一位 {s[prefix+'first_rate']*100:5.1f}%  "
+                f"二位 {s[prefix+'second_rate']*100:5.1f}%  "
+                f"三位 {s[prefix+'third_rate']*100:5.1f}%  "
+                f"四位 {s[prefix+'fourth_rate']*100:5.1f}%")
+    print(f"Challenger  平均顺位 {summary['challenger_avg_rank']:.3f}  {_rank_str(summary, 'challenger_')}  平均得分 {summary['challenger_avg_score']:.0f}")
+    print(f"Baseline    平均顺位 {summary['baseline_avg_rank']:.3f}  {_rank_str(summary, 'baseline_')}  平均得分 {summary['baseline_avg_score']:.0f}")
     print(f"顺位差 Δ={delta:+.3f}  {verdict}")
     print("="*58)
     _save_rust_results(all_results, args.output, args.compress)
@@ -386,10 +405,37 @@ def run_rust_selfplay(args) -> None:
         print()
 
     elapsed = time.time() - t0
-    print(f"\n{'='*58}")
+
+    # ── 顺位统计 ──────────────────────────────────────────────
+    from collections import defaultdict
+    agent_ranks: dict[str, list[int]] = defaultdict(list)
+    agent_scores_map: dict[str, list[int]] = defaultdict(list)
+    for r in all_results:
+        names = list(r.names)
+        rnks  = list(r.rankings())
+        scs   = list(r.scores)
+        for seat in range(4):
+            agent_ranks[names[seat]].append(rnks[seat])
+            agent_scores_map[names[seat]].append(scs[seat])
+
+    print(f"\n{'='*68}")
     print(f"自对弈完成  {len(all_results)} 局 | 用时 {elapsed:.1f}s | "
           f"速度 {len(all_results)/elapsed:.2f} 局/s")
-    print("="*58)
+    print(f"{'─'*68}")
+    print(f"{'名称':<16} {'平均顺位':>8} {'一位':>7} {'二位':>7} {'三位':>7} {'四位':>7} {'平均得分':>10}")
+    print(f"{'─'*16} {'─'*8} {'─'*7} {'─'*7} {'─'*7} {'─'*7} {'─'*10}")
+    for name in sorted(agent_ranks.keys()):
+        rks = agent_ranks[name]
+        scs = agent_scores_map[name]
+        n   = max(len(rks), 1)
+        avg = sum(x + 1 for x in rks) / n
+        r1  = sum(1 for x in rks if x == 0) / n * 100
+        r2  = sum(1 for x in rks if x == 1) / n * 100
+        r3  = sum(1 for x in rks if x == 2) / n * 100
+        r4  = sum(1 for x in rks if x == 3) / n * 100
+        sc  = sum(scs) / max(len(scs), 1)
+        print(f"{name:<16} {avg:>8.3f} {r1:>6.1f}% {r2:>6.1f}% {r3:>6.1f}% {r4:>6.1f}% {sc:>10.0f}")
+    print("="*68)
 
     _save_rust_results(all_results, args.output, args.compress)
 
@@ -445,15 +491,19 @@ def print_summary(records, elapsed: float, mode: str = "ai") -> None:
     print(f"\n{'='*58}")
     print(f"对局完成  {n} 局 | 用时 {elapsed:.1f}s | 速度 {n/elapsed:.2f} 局/s")
     print(f"平均 {avg_kyoku:.1f} 局/游戏")
-    print(f"\n{'名称':<20} {'平均顺位':>8} {'一位率':>8} {'平均得分':>10} {'出场数':>6}")
-    print(f"{'-'*20} {'-'*8} {'-'*8} {'-'*10} {'-'*6}")
+    print(f"\n{'名称':<16} {'平均顺位':>8} {'一位':>7} {'二位':>7} {'三位':>7} {'四位':>7} {'平均得分':>10} {'出场数':>6}")
+    print(f"{'─'*16} {'─'*8} {'─'*7} {'─'*7} {'─'*7} {'─'*7} {'─'*10} {'─'*6}")
     for name in sorted(agent_stats.keys()):
         ranks  = agent_stats[name]
         scores = agent_scores[name]
-        avg_rank   = sum(ranks) / len(ranks) + 1
-        first_rate = ranks.count(0) / len(ranks) * 100
-        avg_score  = sum(scores) / len(scores)
-        print(f"{name:<20} {avg_rank:>8.3f} {first_rate:>7.1f}% {avg_score:>10.0f} {len(ranks):>6}")
+        n = max(len(ranks), 1)
+        avg_rank = sum(ranks) / n + 1
+        r1 = ranks.count(0) / n * 100
+        r2 = ranks.count(1) / n * 100
+        r3 = ranks.count(2) / n * 100
+        r4 = ranks.count(3) / n * 100
+        avg_score = sum(scores) / len(scores)
+        print(f"{name:<16} {avg_rank:>8.3f} {r1:>6.1f}% {r2:>6.1f}% {r3:>6.1f}% {r4:>6.1f}% {avg_score:>10.0f} {len(ranks):>6}")
 
     # versus 模式：额外打印汇总对比
     if mode == "versus":
@@ -472,11 +522,15 @@ def print_summary(records, elapsed: float, mode: str = "ai") -> None:
                        else "→ 持平")
             print(f"\n{'─'*58}")
             print(f"对战汇总（Challenger ch vs Baseline bl）：")
-            print(f"  Challenger  平均顺位 {ch_avg:.3f}  "
-                  f"一位率 {ch_ranks.count(0)/len(ch_ranks)*100:.1f}%  "
+            def _rs(rks):
+                n = max(len(rks), 1)
+                return (f"一位 {rks.count(0)/n*100:5.1f}%  "
+                        f"二位 {rks.count(1)/n*100:5.1f}%  "
+                        f"三位 {rks.count(2)/n*100:5.1f}%  "
+                        f"四位 {rks.count(3)/n*100:5.1f}%")
+            print(f"  Challenger  平均顺位 {ch_avg:.3f}  {_rs(ch_ranks)}  "
                   f"平均得分 {sum(ch_scores)/len(ch_scores):.0f}")
-            print(f"  Baseline    平均顺位 {bl_avg:.3f}  "
-                  f"一位率 {bl_ranks.count(0)/len(bl_ranks)*100:.1f}%  "
+            print(f"  Baseline    平均顺位 {bl_avg:.3f}  {_rs(bl_ranks)}  "
                   f"平均得分 {sum(bl_scores)/len(bl_scores):.0f}")
             print(f"  顺位差 Δ={delta:+.3f}  {verdict}")
 
