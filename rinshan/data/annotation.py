@@ -61,15 +61,6 @@ class Annotation:
     melds:             list[list[tuple]]   # 四家副露，每个副露是 (type, tiles)
     riichi_declared:   list[bool]          # 四家是否立直宣言
 
-    # ── 立直上下文（公开信息，belief 用）──────
-    # riichi_discard_tile[i]: 第 i 家立直宣言时打出的那张牌（旋转后 [0]=己方）
-    #   None 表示该家未立直或数据不可用
-    riichi_discard_tile: list[Optional[Tile]] = field(default_factory=lambda: [None]*4)
-    # riichi_junme[i]: 第 i 家立直时已出了多少张牌（即宣言巡目，-1=未立直）
-    riichi_junme:        list[int]           = field(default_factory=lambda: [-1]*4)
-    # riichi_furiten[i]: 第 i 家是否在振听立直（公开可推断）
-    riichi_furiten:      list[bool]          = field(default_factory=lambda: [False]*4)
-
     # ── 进行序列（历史事件，按时间顺序）────
     progression:   list[int]               # 已编码的进行 token 序列
 
@@ -84,6 +75,15 @@ class Annotation:
     grp_reward:        float  = 0.0        # GRP game value 变化（整场价值分支）
     hand_reward:       float  = 0.0        # 局内得失点 shaping（局内价值分支）
 
+    # ── 立直上下文（公开信息，belief 用）─────────────────────────────
+    # riichi_discard_tile[i]: 第 i 家立直宣言时打出的那张牌（旋转后 [0]=己方）
+    #   None 表示该家未立直或数据不可用
+    riichi_discard_tile: list[Optional[Tile]] = field(default_factory=lambda: [None]*4)
+    # riichi_junme[i]: 第 i 家立直时已出了多少张牌（即宣言巡目，-1=未立直）
+    riichi_junme:        list[int]            = field(default_factory=lambda: [-1]*4)
+    # riichi_furiten[i]: 第 i 家是否在振听立直（公开可推断）
+    riichi_furiten:      list[bool]           = field(default_factory=lambda: [False]*4)
+
     # ── 辅助任务标签 ──────────────────────
     aux: Optional[AuxTargets] = None
 
@@ -92,7 +92,5 @@ class Annotation:
     opponent_hands: Optional[list[list[Tile]]] = None   # [opp0, opp1, opp2] 各自手牌
 
     # ── next state（IQL 用）───────────────
-    # next_annotation_idx: 在 episode buffer 中的下一个决策点 index
-    # 为 None 表示终止状态
     next_idx:  Optional[int] = None
     is_done:   bool           = False

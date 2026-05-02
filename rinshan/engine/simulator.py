@@ -698,39 +698,138 @@ class MjaiSimulator:
         meld_count = len(view.melds[0]) if view.melds else 0
         sht = calc_shanten(counts, meld_count)
 
+        # ── 对手待张计算 ────────────────────────────────────────────
+        opp_wait_tiles = self._calc_opp_wait_tiles(state, seat)
+        opp_tenpai = [
+            int(state.in_riichi[(seat + i + 1) % 4]) for i in range(3)
+        ]
+        # 默听/副露听：用 shanten 判断是否真正处于听牌等待
+        for i in range(3):
+            opp_abs = (seat + i + 1) % 4
+            if not state.in_riichi[opp_abs]:
+                opp_hand = state.hands[opp_abs]
+                if opp_hand:
+                    c = hand_to_counts(opp_hand)
+                    mc = len(state.melds[opp_abs])
+                    if sum(c) == 13 and calc_shanten(c, mc) == 0:
+                        opp_tenpai[i] = 1
+
         aux = AuxTargets(
-            shanten      = sht,
-            tenpai_prob  = float(sht <= 0),
-            deal_in_risk = self._calc_deal_in_risk(state, seat),
-            opp_tenpai   = [
-                int(state.in_riichi[(seat + i + 1) % 4]) for i in range(3)
-            ],
+            shanten        = sht,
+            tenpai_prob    = float(sht <= 0),
+            deal_in_risk   = self._calc_deal_in_risk(state, seat),
+            opp_tenpai     = opp_tenpai,
+            opp_wait_tiles = opp_wait_tiles,
         )
 
+        # ── 立直上下文（旋转到 [0]=己方）──────────────────────────
+        def _rot(lst, n):
+            return lst[n:] + lst[:n]
+
+        # 立直宣言牌：从 discards[seat][riichi_discard_idx[seat]] 读取
+        riichi_discard_tile = []
+        for s in range(4):
+            idx = state.riichi_discard_idx[s]
+            if idx >= 0 and idx < len(state.discards[s]):
+                riichi_discard_tile.append(state.discards[s][idx])
+            else:
+                riichi_discard_tile.append(None)
+        riichi_discard_tile = _rot(riichi_discard_tile, seat)
+
+        # 宣言巡目：riichi_discard_idx 就是宣言时已打出的张数
+        riichi_junme_abs = list(state.riichi_discard_idx)
+        riichi_junme = _rot(riichi_junme_abs, seat)
+
+        # 振听：公开信息里只有立直振听是确定可知的
+        riichi_furiten = _rot(list(state.furiten), seat)
+
         return Annotation(
-            game_id           = game_id,
-            player_id         = seat,
-            round_wind        = view.round_wind,
-            round_num         = view.round_num,
-            honba             = view.honba,
-            kyotaku           = view.kyotaku,
-            scores            = list(view.scores),
-            tiles_left        = view.tiles_left,
-            hand              = list(view.hand),
-            dora_indicators   = list(view.dora_indicators),
-            discards          = [list(d) for d in view.discards],
-            melds             = [list(m) for m in view.melds],
-            riichi_declared   = list(view.riichi_declared),
-            progression       = list(view.progression),
-            action_candidates = list(cands),
-            action_chosen     = chosen,
-            aux               = aux,
-            # 三家对手手牌（全知视角，天凤日志里四家手牌均可见）
-            # 旋转使 [0]=座位(seat+1)%4, [1]=(seat+2)%4, [2]=(seat+3)%4
-            opponent_hands    = [
+            game_id              = game_id,
+            player_id            = seat,
+            round_wind           = view.round_wind,
+            round_num            = view.round_num,
+            honba                = view.honba,
+            kyotaku              = view.kyotaku,
+            scores               = list(view.scores),
+            tiles_left           = view.tiles_left,
+            hand                 = list(view.hand),
+            dora_indicators      = list(view.dora_indicators),
+            discards             = [list(d) for d in view.discards],
+            melds                = [list(m) for m in view.melds],
+            riichi_declared      = list(view.riichi_declared),
+            riichi_discard_tile  = riichi_discard_tile,
+            riichi_junme         = riichi_junme,
+            riichi_furiten       = riichi_furiten,
+            progression          = list(view.progression),
+            action_candidates    = list(cands),
+            action_chosen        = chosen,
+            aux                  = aux,
+            opponent_hands       = [
                 list(state.hands[(seat + i + 1) % 4]) for i in range(3)
             ],
         )
+
+    def _calc_opp_wait_tiles(
+        self, state: GameState, seat: int
+    ) -> list[list[int]] | None:
+        """
+        计算三个对手各自的待张 tile_id 列表。
+        只对「当前处于 tenpai（shanten==0, 13张）」或「已立直」的对手计算；
+        其他情况该对手的列表为空 []。
+        返回 [opp0_waits, opp1_waits, opp2_waits]（旋转后 opp0=(seat+1)%4）。
+        """
+        result: list[list[int]] = []
+        for i in range(3):
+            opp = (seat + i + 1) % 4
+            opp_hand = state.hands[opp]
+            if not opp_hand or state.furiten[opp]:
+                result.append([])
+                continue
+
+            counts = hand_to_counts(opp_hand)
+            mc = len(state.melds[opp])
+            n_tiles = sum(counts)
+
+            if state.in_riichi[opp]:
+                # 立直：手牌固定，直接枚举待张
+                waits = []
+                for t in range(34):
+                    counts[t] += 1
+                    if calc_shanten(counts, mc) == -1:
+                        waits.append(t)
+                    counts[t] -= 1
+                result.append(waits)
+
+            elif n_tiles == 13 and calc_shanten(counts, mc) == 0:
+                # 默听/副露听：13 张且 shanten==0
+                waits = []
+                for t in range(34):
+                    counts[t] += 1
+                    if calc_shanten(counts, mc) == -1:
+                        waits.append(t)
+                    counts[t] -= 1
+                result.append(waits)
+
+            elif n_tiles == 14:
+                # 刚摸牌，取所有打法的待张并集（保守估计）
+                waits_set: set[int] = set()
+                for discard_t in range(34):
+                    if counts[discard_t] == 0:
+                        continue
+                    counts[discard_t] -= 1
+                    if calc_shanten(counts, mc) == 0:
+                        for w in range(34):
+                            counts[w] += 1
+                            if calc_shanten(counts, mc) == -1:
+                                waits_set.add(w)
+                            counts[w] -= 1
+                    counts[discard_t] += 1
+                result.append(sorted(waits_set))
+
+            else:
+                result.append([])
+
+        return result
 
     def _calc_deal_in_risk(self, state: GameState, seat: int) -> list[float]:
         """
