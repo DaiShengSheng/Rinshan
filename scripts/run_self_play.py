@@ -290,13 +290,11 @@ def _collect_mjson(log_dir: str, output_dir: str, n_games: int, label: str = "ga
             out_name = f"{label}.mjson"
         out_path = dest_dir / out_name
 
-        # 解压 → 逐行写出（保持每行一个 JSON 的 MJAI 格式）
-        with gzip.open(gz_path, "rt", encoding="utf-8") as src, \
-             open(out_path, "w", encoding="utf-8") as dst:
-            for line in src:
-                line = line.strip()
-                if line:
-                    dst.write(line + "\n")
+        # 解压 → 包成 JSON 数组（tenhou.net/6 要求整个文件是 JSON array）
+        with gzip.open(gz_path, "rt", encoding="utf-8") as src:
+            events = [json.loads(ln) for ln in src if ln.strip()]
+        with open(out_path, "w", encoding="utf-8") as dst:
+            dst.write(json.dumps(events, ensure_ascii=False))
 
     if multi:
         print(f"[+] 已导出 {len(mjson_files)} 局 mjson → {dest_dir}/")
@@ -712,22 +710,13 @@ def _export_python_mjson(records, output_dir: str) -> None:
     for idx, rec in enumerate(records):
         out_name = f"game_{idx:04d}.mjson" if multi else "game.mjson"
         out_path = dest_dir / out_name
+        # 拼装事件列表，包成 JSON 数组（tenhou.net/6 要求整个文件是 JSON array）
+        events = [{"type": "start_game", "id": 0, "names": rec.agent_names}]
+        for kyoku_events in rec.kyoku_logs:
+            events.extend(kyoku_events)
+        events.append({"type": "end_game", "scores": rec.final_scores})
         with open(out_path, "w", encoding="utf-8") as f:
-            # start_game
-            f.write(json.dumps({
-                "type":  "start_game",
-                "id":    0,
-                "names": rec.agent_names,
-            }, ensure_ascii=False) + "\n")
-            # 逐局事件
-            for kyoku_events in rec.kyoku_logs:
-                for evt in kyoku_events:
-                    f.write(json.dumps(evt, ensure_ascii=False) + "\n")
-            # end_game
-            f.write(json.dumps({
-                "type":   "end_game",
-                "scores": rec.final_scores,
-            }, ensure_ascii=False) + "\n")
+            f.write(json.dumps(events, ensure_ascii=False))
 
     if multi:
         print(f"[+] 已导出 {len(records)} 局 mjson → {dest_dir}/")
