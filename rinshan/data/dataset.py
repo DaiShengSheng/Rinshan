@@ -275,8 +275,13 @@ def collate_fn(batch: list[dict]) -> dict:
                     merged[sub_k] = torch.tensor(sub_vals)
                 elif isinstance(sub_vals[0], list):
                     merged[sub_k] = torch.tensor(sub_vals, dtype=torch.float32)
-                else:
+                elif isinstance(sub_vals[0], torch.Tensor):
                     merged[sub_k] = torch.stack(sub_vals)
+                else:
+                    # numpy.ndarray 或其他，转 tensor 后 stack
+                    merged[sub_k] = torch.stack([
+                        torch.as_tensor(v) for v in sub_vals
+                    ])
             result[k] = merged
             continue
 

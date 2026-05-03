@@ -184,6 +184,10 @@ class GameEncoder:
                 belief_tokens_list.append(PAD_TOKEN)
             # 宣言巡目分桶：-1=未立直 → PAD；0~8 bin → RIICHI_JUNME_OFFSET + seat*9 + bin
             junme = riichi_junmes[seat] if riichi_junmes else -1
+            try:
+                junme = int(junme)   # 兼容旧数据里字符串格式的数值
+            except (TypeError, ValueError):
+                junme = -1
             if junme >= 0 and ann.riichi_declared[seat]:
                 jbin = min(junme // 2, 8)   # 每 2 巡一档，共 9 档
                 belief_tokens_list.append(RIICHI_JUNME_OFFSET + seat * 9 + jbin)
@@ -219,20 +223,20 @@ class GameEncoder:
             aux_targets = {
                 "shanten":      a.shanten_label,
                 "tenpai_prob":  float(a.tenpai_prob),
-                "deal_in_risk": a.deal_in_risk,
-                "opp_tenpai":   [float(x) for x in a.opp_tenpai],
+                "deal_in_risk": torch.tensor(a.deal_in_risk, dtype=torch.float32),
+                "opp_tenpai":   torch.tensor([float(x) for x in a.opp_tenpai], dtype=torch.float32),
             }
             # 待张标签：(34, 3) float binary，只有对手处于 tenpai 时有意义
             if a.opp_wait_tiles is not None:
-                wait_arr = np.zeros((NUM_TILE_TYPES, 3), dtype=np.float32)
+                wait_arr = torch.zeros((NUM_TILE_TYPES, 3), dtype=torch.float32)
                 for opp_idx, wait_list in enumerate(a.opp_wait_tiles[:3]):
                     for tid in wait_list:
                         if 0 <= tid < NUM_TILE_TYPES:
                             wait_arr[tid, opp_idx] = 1.0
                 aux_targets["opp_wait_tiles"] = wait_arr
                 # tenpai mask：(3,) float——只对 tenpai 对手计算 wait loss
-                aux_targets["opp_tenpai_mask"] = np.array(
-                    [float(x) for x in a.opp_tenpai], dtype=np.float32
+                aux_targets["opp_tenpai_mask"] = torch.tensor(
+                    [float(x) for x in a.opp_tenpai], dtype=torch.float32
                 )
 
         return {
