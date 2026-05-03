@@ -71,7 +71,7 @@ def _json_to_annotation(d: dict) -> Annotation:
         melds              = melds,
         riichi_declared    = d.get("riichi_declared", [False, False, False, False]),
         riichi_discard_tile= [
-            Tile.from_id(t) if t is not None else None
+            Tile.from_mjai(t) if t is not None else None
             for t in d.get("riichi_discard_tile", [None]*4)
         ],
         riichi_junme       = d.get("riichi_junme", [-1]*4),
