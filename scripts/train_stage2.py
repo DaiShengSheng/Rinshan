@@ -156,6 +156,67 @@ def main():
         best_val_loss = ckpt.get("best_val_loss", float("inf"))
         logger.info(f"Resumed at step {trainer.step}, best_val_loss={best_val_loss:.4f}")
 
+    # ── Oracle 蒸馏信号诊断 ───────────────────────────────────────────────
+    # 目的：确认 Oracle 真的在利用 oracle_tokens 里的对手手牌信息。
+    # 若 Oracle 和 Student 输出的 Q 分布几乎一致（KL < 0.05），说明 Oracle 并未
+    # 有效利用全信息，蒸馏信号近似噪声，需要先单独 fine-tune Oracle。
+    import torch.nn.functional as _F
+    trainer.model.eval()
+    trainer.oracle_model.eval()
+    _diag_kl = 0.0
+    _diag_q_gap = 0.0   # Oracle 和 Student Q 值均值绝对差，衡量两者分布偏移
+    _diag_n = 0
+    _diag_loader = DataLoader(val_ds, batch_size=batch_size, collate_fn=collate_fn,
+                              num_workers=0, pin_memory=False)
+    with torch.no_grad():
+        for _db in _diag_loader:
+            _s_out = trainer.model(
+                tokens         = trainer._to_device(_db["tokens"]),
+                candidate_mask = trainer._to_device(_db["candidate_mask"]),
+                pad_mask       = trainer._to_device(_db.get("pad_mask")),
+                belief_tokens  = trainer._to_device(_db.get("belief_tokens")),
+                belief_pad_mask= trainer._to_device(_db.get("belief_pad_mask")),
+            )
+            _o_out = trainer.oracle_model(
+                tokens         = trainer._to_device(_db["oracle_tokens"]),
+                candidate_mask = trainer._to_device(_db["candidate_mask"]),
+                pad_mask       = trainer._to_device(_db.get("oracle_pad_mask")),
+            )
+            _sq = _s_out.q.float().masked_fill(_s_out.q == float('-inf'), -1e9)
+            _oq = _o_out.q.float().masked_fill(_o_out.q == float('-inf'), -1e9)
+            _kl = _F.kl_div(
+                _F.log_softmax(_sq / 2.0, dim=-1),
+                _F.softmax(_oq / 2.0, dim=-1),
+                reduction='batchmean'
+            ).item()
+            _gap = (_oq - _sq).abs().mean().item()
+            _diag_kl  += _kl
+            _diag_q_gap += _gap
+            _diag_n   += 1
+            if _diag_n >= 50:
+                break
+    trainer.model.train()
+    _diag_kl   /= max(_diag_n, 1)
+    _diag_q_gap /= max(_diag_n, 1)
+    logger.info(
+        f"[diag] Oracle-Student initial KL={_diag_kl:.4f}  Q_abs_gap={_diag_q_gap:.4f}"
+        f"  (over {_diag_n} batches)"
+    )
+    if _diag_kl < 0.05:
+        logger.warning(
+            "[diag] ⚠ KL < 0.05 — Oracle Q 分布与 Student 几乎一致，"
+            "蒸馏信号极弱！建议先对 Oracle 用 oracle_tokens 做 BC fine-tune 数千步，"
+            "确保 Oracle 真正利用了对手手牌信息后再启动 Stage 2 蒸馏。"
+        )
+    elif _diag_kl < 0.2:
+        logger.warning(
+            "[diag] ⚠ KL < 0.2 — 蒸馏信号偏弱，Oracle 可能未充分利用全信息。"
+            "建议观察前 5000 步 kl loss 是否持续下降；若平台期过早出现，考虑先 fine-tune Oracle。"
+        )
+    else:
+        logger.info("[diag] ✓ KL 信号充足，Oracle 有效利用全信息，蒸馏可正常进行。")
+    # ── end diag ─────────────────────────────────────────────────────────
+
     logger.info(f"Starting Stage 2 (self-distillation) for {total_steps} steps")
 
     step = 0
