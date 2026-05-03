@@ -394,17 +394,27 @@ class Trainer:
         # 定期日志
         if self.step % self.cfg.log_every == 0:
             lr = self.scheduler.get_last_lr()[0]
-            # 拼接 aux 分量（只在有值时显示）
-            aux_keys = ["action", "belief", "aux_shanten", "aux_tenpai_prob",
-                        "aux_deal_in_risk", "aux_opp_tenpai"]
-            aux_parts = "  ".join(
-                f"{k.replace('aux_','')}={loss_dict[k]:.3f}"
-                for k in aux_keys if k in loss_dict
-            )
-            logger.info(
-                f"[step {self.step}] loss={loss_dict['total']:.4f}  lr={lr:.2e}"
-                + (f"  | {aux_parts}" if aux_parts else "")
-            )
+            if self.cfg.stage == 2:
+                # Stage 2 专用：显示蒸馏核心分量 + belief/wait 辅助
+                s2_keys = [("kl", "kl"), ("bc", "bc"), ("belief", "bel"),
+                           ("wait", "wait"), ("total", "total")]
+                parts = "  ".join(
+                    f"{short}={loss_dict[k]:.4f}"
+                    for k, short in s2_keys if k in loss_dict
+                )
+                logger.info(f"[step {self.step}] {parts}  lr={lr:.2e}")
+            else:
+                # Stage 1 / 3 原有逻辑
+                aux_keys = ["action", "belief", "aux_shanten", "aux_tenpai_prob",
+                            "aux_deal_in_risk", "aux_opp_tenpai"]
+                aux_parts = "  ".join(
+                    f"{k.replace('aux_','')}={loss_dict[k]:.3f}"
+                    for k in aux_keys if k in loss_dict
+                )
+                logger.info(
+                    f"[step {self.step}] loss={loss_dict['total']:.4f}  lr={lr:.2e}"
+                    + (f"  | {aux_parts}" if aux_parts else "")
+                )
 
         # 定期保存
         if self.step % self.cfg.save_every == 0:

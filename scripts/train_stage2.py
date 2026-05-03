@@ -168,20 +168,28 @@ def main():
 
         if step % val_every == 0:
             trainer.model.eval()
-            val_loss = 0.0
+            val_kl = 0.0
+            val_bc = 0.0
+            val_total = 0.0
             n_val = 0
             with torch.no_grad():
                 for vb in val_loader:
                     _, ld = trainer._forward_and_loss(vb)
-                    val_loss += ld["kl"]   # 只用 KL loss 做 best 判断，排除辅助任务噪声
+                    val_kl    += ld.get("kl", 0.0)
+                    val_bc    += ld.get("bc", 0.0)
+                    val_total += ld.get("total", 0.0)
                     n_val += 1
                     if n_val >= 200:
                         break
             trainer.model.train()
-            val_loss /= max(n_val, 1)
-            logger.info(f"[val step={step}] val_loss={val_loss:.4f}  best={best_val_loss:.4f}  patience={patience_counter}/{patience}")
-            if val_loss < best_val_loss:
-                best_val_loss = val_loss
+            n = max(n_val, 1)
+            val_kl /= n; val_bc /= n; val_total /= n
+            logger.info(
+                f"[val step={step}] kl={val_kl:.4f}  bc={val_bc:.4f}  total={val_total:.4f}"
+                f"  best_kl={best_val_loss:.4f}  patience={patience_counter}/{patience}"
+            )
+            if val_kl < best_val_loss:
+                best_val_loss = val_kl
                 patience_counter = 0
                 # 将 best_val_loss 一并存进 checkpoint
                 torch.save(
@@ -196,7 +204,7 @@ def main():
                     },
                     ckpt_dir / "best.pt",
                 )
-                logger.info(f"New best saved (val_loss={best_val_loss:.4f})")
+                logger.info(f"New best saved (val_kl={best_val_loss:.4f})")
             else:
                 patience_counter += 1
                 if patience_counter >= patience:
