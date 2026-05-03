@@ -331,6 +331,28 @@ def main():
 
     logger.info(f"Starting Stage 2 (self-distillation) for {total_steps} steps")
 
+    # 移动平均窗口（用于训练 log 的趋势判断）
+    _ema_alpha = 0.05           # 越小越平滑，约等于最近 20 步平均
+    _ema:      dict[str, float] = {}
+    _ema_prev: dict[str, float] = {}   # 上一个 log_every 周期的 EMA，用于算方向
+    log_every = int(cfg.get("log_every", 100))
+
+    def _update_ema(d: dict) -> None:
+        for k, v in d.items():
+            if isinstance(v, float):
+                _ema[k] = v if k not in _ema else (1 - _ema_alpha) * _ema[k] + _ema_alpha * v
+
+    def _trend(key: str) -> str:
+        """返回 ↓ / ↑ / → 趋势符号（和上一周期 EMA 对比）"""
+        if key not in _ema or key not in _ema_prev:
+            return ""
+        delta = _ema[key] - _ema_prev[key]
+        if delta < -0.001:
+            return "↓"
+        if delta > 0.001:
+            return "↑"
+        return "→"
+
     step = 0
     for batch in train_loader:
         if step >= total_steps:
@@ -338,6 +360,22 @@ def main():
 
         loss_dict = trainer.train_step(batch)
         step = trainer.step
+        _update_ema(loss_dict)
+
+        # EMA 摘要行：每 log_every 步追加一行趋势，紧跟 trainer 内部的瞬时 log
+        if step % log_every == 0:
+            ema_kl    = _ema.get("kl",    float("nan"))
+            ema_bc    = _ema.get("bc",    float("nan"))
+            ema_score = ema_kl + 0.3 * ema_bc
+            logger.info(
+                f"[ema  {step}] "
+                f"kl={ema_kl:.4f}{_trend('kl')}  "
+                f"bc={ema_bc:.4f}{_trend('bc')}  "
+                f"score(kl+0.3bc)={ema_score:.4f}"
+                + (f"{_trend('kl')}" if "kl" in _ema_prev else "  (warming up)")
+            )
+            # 快照当前 EMA，供下一周期计算趋势
+            _ema_prev.update(_ema)
 
         if step % val_every == 0:
             trainer.model.eval()
@@ -357,14 +395,17 @@ def main():
             trainer.model.train()
             n = max(n_val, 1)
             val_kl /= n; val_bc /= n; val_total /= n
+            val_score = val_kl + 0.3 * val_bc   # KL 主导，BC 作约束
+            is_best = val_score < best_val_loss
+            best_tag = " ← best" if is_best else ""
             logger.info(
-                f"[val step={step}] kl={val_kl:.4f}  bc={val_bc:.4f}  total={val_total:.4f}"
-                f"  best_kl={best_val_loss:.4f}  patience={patience_counter}/{patience}"
+                f"[val step={step}] kl={val_kl:.4f}  bc={val_bc:.4f}  "
+                f"score(kl+0.3bc)={val_score:.4f}  total={val_total:.4f}"
+                f"  best={best_val_loss:.4f}  patience={patience_counter}/{patience}{best_tag}"
             )
-            if val_kl < best_val_loss:
-                best_val_loss = val_kl
+            if is_best:
+                best_val_loss = val_score
                 patience_counter = 0
-                # 将 best_val_loss 一并存进 checkpoint
                 torch.save(
                     {
                         "step": trainer.step,
@@ -377,7 +418,7 @@ def main():
                     },
                     ckpt_dir / "best.pt",
                 )
-                logger.info(f"New best saved (val_kl={best_val_loss:.4f})")
+                logger.info(f"New best saved (score={best_val_loss:.4f})")
             else:
                 patience_counter += 1
                 if patience_counter >= patience:
