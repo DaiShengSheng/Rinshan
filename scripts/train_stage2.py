@@ -124,7 +124,7 @@ def main():
     total_steps = int(cfg.get("total_steps", 50_000))
     val_every   = int(cfg.get("val_every", 1000))
     best_val_loss = float("inf")
-    patience = int(cfg.get("patience", 5))   # 连续 N 次 val 不改善则停止
+    patience = int(cfg.get("patience", 8))   # 连续 N 次 val 不改善则停止
     patience_counter = 0
 
     # ── Resume from checkpoint ────────────────
@@ -173,9 +173,9 @@ def main():
             with torch.no_grad():
                 for vb in val_loader:
                     _, ld = trainer._forward_and_loss(vb)
-                    val_loss += ld["total"]
+                    val_loss += ld["kl"]   # 只用 KL loss 做 best 判断，排除辅助任务噪声
                     n_val += 1
-                    if n_val >= 20:
+                    if n_val >= 200:
                         break
             trainer.model.train()
             val_loss /= max(n_val, 1)
