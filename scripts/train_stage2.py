@@ -2,12 +2,11 @@
 train_stage2.py — Stage 2: Oracle 蒸馏
 
 用"看全牌的 Oracle 模型"指导学生模型（只看公开信息）。
-注意：需要先有 Stage 1 训练好的模型，且数据要含 opponent_hands 字段。
-天凤公开数据没有对手手牌，所以 Oracle 只能用于有全信息数据时（如自对弈或特殊格式）。
+天凤牌谱包含完整的全流程信息（含对手手牌），因此可直接使用真 Oracle 蒸馏。
 
-当数据里没有 opponent_hands 时，Stage 2 自动退化为：
-  用 Stage 1 的模型本身作为 "Oracle"，做自蒸馏（knowledge distillation）
-  实际上相当于用更高温度重训练，有一定正则化效果。
+Oracle 模型以全信息序列（己方手牌 + 三家对手手牌）作为输入，
+输出软标签 Q 分布指导学生模型，使学生在只能观测公开信息的条件下
+尽量逼近全知视角下的决策分布。
 
 Usage:
     python scripts/train_stage2.py configs/stage2_base.yaml --stage1_ckpt checkpoints/stage1_base/best.pt
