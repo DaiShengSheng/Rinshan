@@ -26,5 +26,11 @@ log_every: 100
 val_every: 5000
 patience: 8
 
+# Oracle 蒸馏信号诊断 + 自动 fine-tune
+# KL 低于此阈值时自动对 Oracle 做 BC fine-tune，再继续蒸馏
+oracle_kl_threshold: 0.2
+oracle_finetune_steps: 3000   # fine-tune 步数，信号极弱时可调大到 5000
+oracle_finetune_lr: 2e-5      # fine-tune 学习率，比主训练低一个量级
+
 device: cuda
 num_workers: 16

@@ -32,6 +32,136 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 logger = logging.getLogger("train_stage2")
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Oracle 诊断 + 自动 fine-tune
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _measure_oracle_kl(
+    trainer,
+    val_ds,
+    batch_size: int,
+    n_batches: int = 50,
+) -> tuple[float, float]:
+    """测量当前 Oracle-Student KL 散度和 Q 值绝对差，用于判断蒸馏信号强度。"""
+    import torch.nn.functional as F
+    trainer.model.eval()
+    trainer.oracle_model.eval()
+    diag_loader = DataLoader(val_ds, batch_size=batch_size, collate_fn=collate_fn,
+                             num_workers=0, pin_memory=False)
+    kl_sum = q_gap_sum = 0.0
+    n = 0
+    with torch.no_grad():
+        for db in diag_loader:
+            s_out = trainer.model(
+                tokens          = trainer._to_device(db["tokens"]),
+                candidate_mask  = trainer._to_device(db["candidate_mask"]),
+                pad_mask        = trainer._to_device(db.get("pad_mask")),
+                belief_tokens   = trainer._to_device(db.get("belief_tokens")),
+                belief_pad_mask = trainer._to_device(db.get("belief_pad_mask")),
+            )
+            o_out = trainer.oracle_model(
+                tokens         = trainer._to_device(db["oracle_tokens"]),
+                candidate_mask = trainer._to_device(db["candidate_mask"]),
+                pad_mask       = trainer._to_device(db.get("oracle_pad_mask")),
+            )
+            sq = s_out.q.float().masked_fill(s_out.q == float('-inf'), -1e9)
+            oq = o_out.q.float().masked_fill(o_out.q == float('-inf'), -1e9)
+            kl_sum    += F.kl_div(F.log_softmax(sq / 2.0, dim=-1),
+                                   F.softmax(oq / 2.0, dim=-1),
+                                   reduction='batchmean').item()
+            q_gap_sum += (oq - sq).abs().mean().item()
+            n += 1
+            if n >= n_batches:
+                break
+    trainer.model.train()
+    return kl_sum / max(n, 1), q_gap_sum / max(n, 1)
+
+
+def finetune_oracle(
+    trainer,
+    train_ds,
+    val_ds,
+    batch_size: int,
+    device: torch.device,
+    ckpt_dir: Path,
+    finetune_steps: int = 3000,
+    finetune_lr: float = 2e-5,
+    num_workers: int = 4,
+) -> None:
+    """
+    用 oracle_tokens 对 Oracle 做 BC fine-tune，使其真正利用对手手牌信息。
+    fine-tune 完成后 Oracle 自动重新冻结，权重保存到 ckpt_dir/oracle_finetuned.pt。
+    """
+    import torch.nn.functional as F
+    from torch.optim import AdamW
+
+    oracle_ckpt = ckpt_dir / "oracle_finetuned.pt"
+    if oracle_ckpt.exists():
+        logger.info(f"[oracle_ft] Found existing fine-tuned Oracle at {oracle_ckpt}, loading directly.")
+        sd = torch.load(oracle_ckpt, map_location=device, weights_only=True)["model"]
+        trainer.oracle_model.load_state_dict(sd, strict=True)
+        trainer.oracle_model.eval()
+        trainer.oracle_model.requires_grad_(False)
+        return
+
+    logger.info(
+        f"[oracle_ft] KL < 0.2 — starting Oracle BC fine-tune for {finetune_steps} steps "
+        f"(lr={finetune_lr:.1e}) to strengthen distillation signal."
+    )
+
+    # 临时解冻 Oracle
+    trainer.oracle_model.train()
+    trainer.oracle_model.requires_grad_(True)
+
+    optimizer = AdamW(
+        [p for p in trainer.oracle_model.parameters() if p.requires_grad],
+        lr=finetune_lr, weight_decay=0.01, betas=(0.9, 0.95),
+    )
+
+    ft_loader = DataLoader(train_ds, batch_size=batch_size, collate_fn=collate_fn,
+                           num_workers=num_workers, pin_memory=True)
+
+    step = 0
+    loss_acc = 0.0
+    for batch in ft_loader:
+        if step >= finetune_steps:
+            break
+
+        oracle_tokens  = trainer._to_device(batch["oracle_tokens"])
+        candidate_mask = trainer._to_device(batch["candidate_mask"])
+        oracle_pad     = trainer._to_device(batch.get("oracle_pad_mask"))
+        action_idx     = batch["action_idx"].to(device)
+
+        with torch.autocast(device_type=device.type, dtype=torch.bfloat16, enabled=True):
+            out = trainer.oracle_model(
+                tokens=oracle_tokens,
+                candidate_mask=candidate_mask,
+                pad_mask=oracle_pad,
+            )
+            # 纯 BC loss：让 Oracle 在全信息输入下模仿人类动作
+            loss = F.cross_entropy(out.q.float().masked_fill(out.q == float('-inf'), -1e9),
+                                   action_idx)
+
+        optimizer.zero_grad(set_to_none=True)
+        loss.backward()
+        torch.nn.utils.clip_grad_norm_(trainer.oracle_model.parameters(), 1.0)
+        optimizer.step()
+
+        step += 1
+        loss_acc += loss.item()
+        if step % 500 == 0:
+            logger.info(f"[oracle_ft step={step}/{finetune_steps}] bc_loss={loss_acc/500:.4f}")
+            loss_acc = 0.0
+
+    # 保存 fine-tuned Oracle
+    torch.save({"model": trainer.oracle_model.state_dict()}, oracle_ckpt)
+    logger.info(f"[oracle_ft] Fine-tune complete. Saved to {oracle_ckpt}")
+
+    # 重新冻结
+    trainer.oracle_model.eval()
+    trainer.oracle_model.requires_grad_(False)
+
+
 def main():
     if len(sys.argv) < 2:
         print("Usage: python train_stage2.py <config.yaml> --stage1_ckpt <path>")
@@ -156,63 +286,45 @@ def main():
         best_val_loss = ckpt.get("best_val_loss", float("inf"))
         logger.info(f"Resumed at step {trainer.step}, best_val_loss={best_val_loss:.4f}")
 
-    # ── Oracle 蒸馏信号诊断 ───────────────────────────────────────────────
-    # 目的：确认 Oracle 真的在利用 oracle_tokens 里的对手手牌信息。
-    # 若 Oracle 和 Student 输出的 Q 分布几乎一致（KL < 0.05），说明 Oracle 并未
-    # 有效利用全信息，蒸馏信号近似噪声，需要先单独 fine-tune Oracle。
-    import torch.nn.functional as _F
-    trainer.model.eval()
-    trainer.oracle_model.eval()
-    _diag_kl = 0.0
-    _diag_q_gap = 0.0   # Oracle 和 Student Q 值均值绝对差，衡量两者分布偏移
-    _diag_n = 0
-    _diag_loader = DataLoader(val_ds, batch_size=batch_size, collate_fn=collate_fn,
-                              num_workers=0, pin_memory=False)
-    with torch.no_grad():
-        for _db in _diag_loader:
-            _s_out = trainer.model(
-                tokens         = trainer._to_device(_db["tokens"]),
-                candidate_mask = trainer._to_device(_db["candidate_mask"]),
-                pad_mask       = trainer._to_device(_db.get("pad_mask")),
-                belief_tokens  = trainer._to_device(_db.get("belief_tokens")),
-                belief_pad_mask= trainer._to_device(_db.get("belief_pad_mask")),
-            )
-            _o_out = trainer.oracle_model(
-                tokens         = trainer._to_device(_db["oracle_tokens"]),
-                candidate_mask = trainer._to_device(_db["candidate_mask"]),
-                pad_mask       = trainer._to_device(_db.get("oracle_pad_mask")),
-            )
-            _sq = _s_out.q.float().masked_fill(_s_out.q == float('-inf'), -1e9)
-            _oq = _o_out.q.float().masked_fill(_o_out.q == float('-inf'), -1e9)
-            _kl = _F.kl_div(
-                _F.log_softmax(_sq / 2.0, dim=-1),
-                _F.softmax(_oq / 2.0, dim=-1),
-                reduction='batchmean'
-            ).item()
-            _gap = (_oq - _sq).abs().mean().item()
-            _diag_kl  += _kl
-            _diag_q_gap += _gap
-            _diag_n   += 1
-            if _diag_n >= 50:
-                break
-    trainer.model.train()
-    _diag_kl   /= max(_diag_n, 1)
-    _diag_q_gap /= max(_diag_n, 1)
+    # ── Oracle 蒸馏信号诊断 + 自动 fine-tune ────────────────────────────
+    kl_threshold = float(cfg.get("oracle_kl_threshold",  0.2))
+    ft_steps     = int(cfg.get("oracle_finetune_steps",  3000))
+    ft_lr        = float(cfg.get("oracle_finetune_lr",   2e-5))
+
+    diag_kl, diag_gap = _measure_oracle_kl(trainer, val_ds, batch_size)
     logger.info(
-        f"[diag] Oracle-Student initial KL={_diag_kl:.4f}  Q_abs_gap={_diag_q_gap:.4f}"
-        f"  (over {_diag_n} batches)"
+        f"[diag] Oracle-Student KL={diag_kl:.4f}  Q_abs_gap={diag_gap:.4f}  "
+        f"(threshold={kl_threshold})"
     )
-    if _diag_kl < 0.05:
+    if diag_kl < kl_threshold:
         logger.warning(
-            "[diag] ⚠ KL < 0.05 — Oracle Q 分布与 Student 几乎一致，"
-            "蒸馏信号极弱！建议先对 Oracle 用 oracle_tokens 做 BC fine-tune 数千步，"
-            "确保 Oracle 真正利用了对手手牌信息后再启动 Stage 2 蒸馏。"
+            f"[diag] ⚠ KL={diag_kl:.4f} < {kl_threshold} — "
+            "Oracle 未充分利用全信息，自动启动 BC fine-tune..."
         )
-    elif _diag_kl < 0.2:
-        logger.warning(
-            "[diag] ⚠ KL < 0.2 — 蒸馏信号偏弱，Oracle 可能未充分利用全信息。"
-            "建议观察前 5000 步 kl loss 是否持续下降；若平台期过早出现，考虑先 fine-tune Oracle。"
+        finetune_oracle(
+            trainer        = trainer,
+            train_ds       = train_ds,
+            val_ds         = val_ds,
+            batch_size     = batch_size,
+            device         = device,
+            ckpt_dir       = ckpt_dir,
+            finetune_steps = ft_steps,
+            finetune_lr    = ft_lr,
+            num_workers    = cfg.get("num_workers", 4),
         )
+        # fine-tune 后重新测量，确认信号增强
+        diag_kl_after, _ = _measure_oracle_kl(trainer, val_ds, batch_size)
+        logger.info(
+            f"[diag] Post-finetune KL={diag_kl_after:.4f}  "
+            f"(+{diag_kl_after - diag_kl:+.4f} vs before)"
+        )
+        if diag_kl_after < kl_threshold:
+            logger.warning(
+                f"[diag] ⚠ KL 仍 < {kl_threshold}，蒸馏信号依然偏弱。"
+                f"可尝试增大 oracle_finetune_steps（当前={ft_steps}）后重跑。"
+            )
+        else:
+            logger.info("[diag] ✓ Oracle fine-tune 后信号充足，继续 Stage 2 蒸馏。")
     else:
         logger.info("[diag] ✓ KL 信号充足，Oracle 有效利用全信息，蒸馏可正常进行。")
     # ── end diag ─────────────────────────────────────────────────────────
