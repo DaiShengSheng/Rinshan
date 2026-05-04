@@ -59,6 +59,10 @@ class TrainerConfig:
     target_update_every: int = 100  # 每 N 步做一次目标网络 EMA 更新
     cql_weight: float = -1.0        # <0 表示使用 constants 默认值，>=0 则覆盖
     weights_only_save: bool = False  # True = 只存 model/target 权重，跳过 optimizer/scheduler
+    # ── Belief Net 权重（Stage 2 可调）─────
+    belief_weight: float = 1.0      # Belief BCE 损失相对蒸馏 loss 的权重
+    belief_pos_weight: float = 2.4  # 正样本权重，补偿有牌(29%)/无牌(71%)不均衡
+
     bc_weight: float = 0.0          # Stage3 anchor：AWR/BC 正则权重
     reward_clip: float = 20.0       # Stage3 GRP 2.0 reward clip
     value_clip: float = 50.0        # Stage3 value/q clip
@@ -278,14 +282,18 @@ class Trainer:
                 has_wait      = out.wait_logits is not None and opp_wait is not None
 
                 if has_belief or has_wait:
+                    # pos_weight=2.4：对手每张牌实际有牌频率≈29%，无牌≈71%
+                    # 正负比 ≈ 0.71/0.29 ≈ 2.4，用 pos_weight 平衡 BCE
+                    # belief_weight=1.0：让 Belief 梯度与蒸馏 loss 同量级
                     bw_loss, bw_dict = belief_and_wait_loss(
                         belief_logits  = out.belief_logits if has_belief else None,
                         wait_logits    = out.wait_logits   if has_wait   else None,
                         actual_hands   = self._to_device(actual_hands).float() if has_belief else None,
                         opp_wait_tiles = self._to_device(opp_wait).float()     if has_wait   else None,
                         opp_tenpai_mask= self._to_device(opp_mask).float() if opp_mask is not None else None,
-                        belief_weight  = 0.2,              # Stage2 降低权重
+                        belief_weight  = getattr(self.cfg, 'belief_weight', 1.0),
                         wait_weight    = BELIEF_WAIT_WEIGHT,
+                        belief_pos_weight = getattr(self.cfg, 'belief_pos_weight', 2.4),
                     )
                     total = total + bw_loss
                     losses.update(bw_dict)

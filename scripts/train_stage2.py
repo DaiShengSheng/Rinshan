@@ -118,11 +118,16 @@ def finetune_oracle(
         lr=finetune_lr, weight_decay=0.01, betas=(0.9, 0.95),
     )
 
-    ft_loader = DataLoader(train_ds, batch_size=batch_size, collate_fn=collate_fn,
+    # Oracle fine-tune 用较小 batch，避免同时持有 Student+Oracle 两套激活 OOM
+    ft_batch_size = min(batch_size, 128)
+    ft_loader = DataLoader(train_ds, batch_size=ft_batch_size, collate_fn=collate_fn,
                            num_workers=num_workers, pin_memory=True)
 
     step = 0
     loss_acc = 0.0
+    grad_accum = max(1, batch_size // ft_batch_size)   # 梯度累积补回等效 batch size
+    optimizer.zero_grad(set_to_none=True)
+
     for batch in ft_loader:
         if step >= finetune_steps:
             break
@@ -141,11 +146,14 @@ def finetune_oracle(
             # 纯 BC loss：让 Oracle 在全信息输入下模仿人类动作
             loss = F.cross_entropy(out.q.float().masked_fill(out.q == float('-inf'), -1e9),
                                    action_idx)
+            loss = loss / grad_accum   # 梯度累积归一
 
-        optimizer.zero_grad(set_to_none=True)
         loss.backward()
-        torch.nn.utils.clip_grad_norm_(trainer.oracle_model.parameters(), 1.0)
-        optimizer.step()
+
+        if (step + 1) % grad_accum == 0:
+            torch.nn.utils.clip_grad_norm_(trainer.oracle_model.parameters(), 1.0)
+            optimizer.step()
+            optimizer.zero_grad(set_to_none=True)
 
         step += 1
         loss_acc += loss.item()

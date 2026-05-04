@@ -27,6 +27,7 @@ def belief_and_wait_loss(
     opp_tenpai_mask: Optional[torch.Tensor], # (B, 3)
     belief_weight: float = 0.3,
     wait_weight: float   = BELIEF_WAIT_WEIGHT,
+    belief_pos_weight: float = 1.0,          # 正样本权重，>1 时强调有牌的召回
 ) -> tuple[torch.Tensor, dict]:
     """
     独立的 Belief + Wait 损失，供 Stage1 和 Stage2 复用。
@@ -37,10 +38,18 @@ def belief_and_wait_loss(
     total = torch.zeros(1, device=device, dtype=torch.float32).squeeze()
     losses: dict = {}
 
-    # 手牌 Belief BCE
+    # 手牌 Belief BCE（支持 pos_weight 平衡正负样本）
     if belief_logits is not None and actual_hands is not None:
         target = (actual_hands > 0).float()
-        b_loss = F.binary_cross_entropy_with_logits(belief_logits, target)
+        if belief_pos_weight != 1.0:
+            pw = torch.tensor(belief_pos_weight,
+                              dtype=belief_logits.dtype,
+                              device=belief_logits.device)
+            b_loss = F.binary_cross_entropy_with_logits(
+                belief_logits, target, pos_weight=pw
+            )
+        else:
+            b_loss = F.binary_cross_entropy_with_logits(belief_logits, target)
         losses["belief"] = b_loss.item()
         total = total + belief_weight * b_loss
 

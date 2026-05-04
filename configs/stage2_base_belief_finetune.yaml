@@ -1,0 +1,42 @@
+# Stage 2 续跑：强化 Belief Net 训练
+# 从 step=70000 best.pt 开始，跑剩余 30000 步
+# 主要改动：
+#   belief_weight: 0.2 → 1.0   （梯度量级与蒸馏 loss 对齐）
+#   belief_pos_weight: 2.4      （平衡正负样本，有牌频率 29% vs 无牌 71%）
+
+stage: 2
+model_preset: base
+stage1_ckpt: /root/autodl-tmp/rinshan/checkpoints/stage1_base/best_v3.pt
+
+data_dir: /root/autodl-tmp/rinshan/data/annotated_v4
+val_ratio: 0.02
+shuffle_buffer: 15000
+
+# Belief 权重调整
+belief_weight: 1.0
+belief_pos_weight: 2.4
+
+lr: 1e-4
+weight_decay: 0.01
+warmup_steps: 0          # 从 best.pt 续跑，不需要重新 warmup
+total_steps: 100000       # trainer 内部会 resume step=70000，跑到 100000
+batch_size: 640
+grad_accum_steps: 1
+max_grad_norm: 0.5
+compile: false
+
+dtype: bfloat16
+amp: true
+
+save_dir: /root/autodl-tmp/rinshan/checkpoints/stage2_base
+save_every: 5000
+log_every: 100
+val_every: 5000
+patience: 8
+
+oracle_kl_threshold: 0.2
+oracle_finetune_steps: 3000
+oracle_finetune_lr: 2e-5
+
+device: cuda
+num_workers: 16
