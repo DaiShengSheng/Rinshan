@@ -151,10 +151,11 @@ def main():
     trn_files = all_files[val_n:]
     logger.info(f"Train files: {len(trn_files)}  Val files: {val_n}")
 
+    # stage=2 才会调用 encode_oracle()，生成含对手手牌的 oracle_tokens
     train_ds = MjaiDataset(trn_files, shuffle_files=True,
-                           shuffle_buffer=cfg.get("shuffle_buffer", 15000), stage=1)
+                           shuffle_buffer=cfg.get("shuffle_buffer", 15000), stage=2)
     val_ds   = MjaiDataset(val_files, shuffle_files=False,
-                           shuffle_buffer=500, stage=1)
+                           shuffle_buffer=500, stage=2)
 
     batch_size   = cfg.get("batch_size", 512)
     num_workers  = cfg.get("num_workers", 8)
