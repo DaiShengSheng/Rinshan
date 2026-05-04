@@ -211,7 +211,9 @@ def main():
     # ── AMP ──────────────────────────────────────────────────
     use_amp  = cfg.get("amp", True)
     dtype    = torch.bfloat16 if cfg.get("dtype", "bfloat16") == "bfloat16" else torch.float16
-    scaler   = torch.cuda.GradScaler(enabled=use_amp and dtype == torch.float16)
+    # bfloat16 不需要 GradScaler（动态范围足够），float16 才需要
+    use_scaler = use_amp and (dtype == torch.float16)
+    scaler     = torch.amp.GradScaler(enabled=use_scaler)
 
     # ── Resume ───────────────────────────────────────────────
     save_dir = Path(cfg.get("save_dir", "checkpoints/oracle"))
@@ -284,7 +286,7 @@ def main():
             )
             loss = loss / grad_accum
 
-        if use_amp and dtype == torch.float16:
+        if use_scaler:
             scaler.scale(loss).backward()
         else:
             loss.backward()
@@ -294,7 +296,7 @@ def main():
         log_total += d["total"]
 
         if (step + 1) % grad_accum == 0:
-            if use_amp and dtype == torch.float16:
+            if use_scaler:
                 scaler.unscale_(optimizer)
                 torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
                 scaler.step(optimizer)
