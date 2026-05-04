@@ -9,7 +9,8 @@
 #   oracle_ckpt: /path/to/oracle_base/best.pt
 
 model_preset: base
-stage1_ckpt:  /root/autodl-tmp/rinshan/checkpoints/stage1_base/best_v3.pt
+# 用 Stage2 best.pt 初始化 — BC 已收敛到 93%，比 Stage1 少跑约 70k 步
+stage1_ckpt:  /root/autodl-tmp/rinshan/checkpoints/stage2_base/best.pt
 
 data_dir:     /root/autodl-tmp/rinshan/data/annotated_v4
 val_ratio:    0.02
@@ -27,8 +28,8 @@ value_weight: 1.0
 lr:           1e-4
 weight_decay: 0.01
 warmup_steps: 1000
-total_steps:  150000    # 热启动，Stage1 已经 200k 步，Oracle 只需补充 value 信号
-                         # 预计 bc 在 50k 步内降到 0.20，150k 步降到 0.13-0.15
+total_steps:  80000     # Stage2 best.pt 起步 bc~0.15，比 Stage1 少 ~70k 步
+                         # 预计 30-50k 步内 bc 降到 0.10-0.12，50-80k 步充分收敛
 batch_size:   640
 grad_accum_steps: 1
 max_grad_norm: 1.0
