@@ -1,0 +1,49 @@
+# Oracle 训练配置
+# 目标：训练一个全信息 value predictor，作为 Stage2 蒸馏的教师
+#
+# 收敛标准：
+#   oracle_bc < 0.15  （Stage1 是 0.40，Oracle 利用全信息后能压到 0.10-0.15）
+#   val 连续 patience 次不改善则停止
+#
+# 完成后在 stage2_base.yaml 中指定：
+#   oracle_ckpt: /path/to/oracle_base/best.pt
+
+model_preset: base
+stage1_ckpt:  /root/autodl-tmp/rinshan/checkpoints/stage1_base/best_v3.pt
+
+data_dir:     /root/autodl-tmp/rinshan/data/annotated_v4
+val_ratio:    0.02
+shuffle_buffer: 15000
+seed: 42
+
+# 损失权重
+# bc_weight=1.0    : BC 是主任务，确保 Q 分布有区分度
+# value_weight=1.0 : value regression 与 BC 同量级
+#   → Oracle 既能预测人类动作，也能预测动作的真实价值
+bc_weight:    1.0
+value_weight: 1.0
+
+# 优化器
+lr:           1e-4
+weight_decay: 0.01
+warmup_steps: 1000
+total_steps:  150000    # 热启动，Stage1 已经 200k 步，Oracle 只需补充 value 信号
+                         # 预计 bc 在 50k 步内降到 0.20，150k 步降到 0.13-0.15
+batch_size:   640
+grad_accum_steps: 1
+max_grad_norm: 1.0
+
+# 精度
+dtype:  bfloat16
+amp:    true
+compile: false
+
+# 保存 & 日志
+save_dir:   /root/autodl-tmp/rinshan/checkpoints/oracle_base
+save_every: 5000
+log_every:  100
+val_every:  5000
+patience:   10          # val 连续 10 次不改善则停止（约 50k 步容忍）
+
+device:      cuda
+num_workers: 16

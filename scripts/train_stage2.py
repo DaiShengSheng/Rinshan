@@ -77,97 +77,9 @@ def _measure_oracle_kl(
     return kl_sum / max(n, 1), q_gap_sum / max(n, 1)
 
 
-def finetune_oracle(
-    trainer,
-    train_ds,
-    val_ds,
-    batch_size: int,
-    device: torch.device,
-    ckpt_dir: Path,
-    finetune_steps: int = 3000,
-    finetune_lr: float = 2e-5,
-    num_workers: int = 4,
-) -> None:
-    """
-    用 oracle_tokens 对 Oracle 做 BC fine-tune，使其真正利用对手手牌信息。
-    fine-tune 完成后 Oracle 自动重新冻结，权重保存到 ckpt_dir/oracle_finetuned.pt。
-    """
-    import torch.nn.functional as F
-    from torch.optim import AdamW
-
-    oracle_ckpt = ckpt_dir / "oracle_finetuned.pt"
-    if oracle_ckpt.exists():
-        logger.info(f"[oracle_ft] Found existing fine-tuned Oracle at {oracle_ckpt}, loading directly.")
-        sd = torch.load(oracle_ckpt, map_location=device, weights_only=True)["model"]
-        trainer.oracle_model.load_state_dict(sd, strict=True)
-        trainer.oracle_model.eval()
-        trainer.oracle_model.requires_grad_(False)
-        return
-
-    logger.info(
-        f"[oracle_ft] KL < 0.2 — starting Oracle BC fine-tune for {finetune_steps} steps "
-        f"(lr={finetune_lr:.1e}) to strengthen distillation signal."
-    )
-
-    # 临时解冻 Oracle
-    trainer.oracle_model.train()
-    trainer.oracle_model.requires_grad_(True)
-
-    optimizer = AdamW(
-        [p for p in trainer.oracle_model.parameters() if p.requires_grad],
-        lr=finetune_lr, weight_decay=0.01, betas=(0.9, 0.95),
-    )
-
-    # Oracle fine-tune 用较小 batch，避免同时持有 Student+Oracle 两套激活 OOM
-    ft_batch_size = min(batch_size, 128)
-    ft_loader = DataLoader(train_ds, batch_size=ft_batch_size, collate_fn=collate_fn,
-                           num_workers=num_workers, pin_memory=True)
-
-    step = 0
-    loss_acc = 0.0
-    grad_accum = max(1, batch_size // ft_batch_size)   # 梯度累积补回等效 batch size
-    optimizer.zero_grad(set_to_none=True)
-
-    for batch in ft_loader:
-        if step >= finetune_steps:
-            break
-
-        oracle_tokens  = trainer._to_device(batch["oracle_tokens"])
-        candidate_mask = trainer._to_device(batch["candidate_mask"])
-        oracle_pad     = trainer._to_device(batch.get("oracle_pad_mask"))
-        action_idx     = batch["action_idx"].to(device)
-
-        with torch.autocast(device_type=device.type, dtype=torch.bfloat16, enabled=True):
-            out = trainer.oracle_model(
-                tokens=oracle_tokens,
-                candidate_mask=candidate_mask,
-                pad_mask=oracle_pad,
-            )
-            # 纯 BC loss：让 Oracle 在全信息输入下模仿人类动作
-            loss = F.cross_entropy(out.q.float().masked_fill(out.q == float('-inf'), -1e9),
-                                   action_idx)
-            loss = loss / grad_accum   # 梯度累积归一
-
-        loss.backward()
-
-        if (step + 1) % grad_accum == 0:
-            torch.nn.utils.clip_grad_norm_(trainer.oracle_model.parameters(), 1.0)
-            optimizer.step()
-            optimizer.zero_grad(set_to_none=True)
-
-        step += 1
-        loss_acc += loss.item()
-        if step % 500 == 0:
-            logger.info(f"[oracle_ft step={step}/{finetune_steps}] bc_loss={loss_acc/500:.4f}")
-            loss_acc = 0.0
-
-    # 保存 fine-tuned Oracle
-    torch.save({"model": trainer.oracle_model.state_dict()}, oracle_ckpt)
-    logger.info(f"[oracle_ft] Fine-tune complete. Saved to {oracle_ckpt}")
-
-    # 重新冻结
-    trainer.oracle_model.eval()
-    trainer.oracle_model.requires_grad_(False)
+# finetune_oracle 已移除。
+# Oracle 必须通过 train_oracle.py 独立训练后，在 yaml 中以 oracle_ckpt 指定路径。
+# 这样保证蒸馏信号来源可复现，不依赖启动时的自动修补。
 
 
 def main():
@@ -241,20 +153,30 @@ def main():
     if missing:
         logger.warning(f"  missing keys: {missing[:8]}")
 
-    # Oracle：全信息模型，接收含对手手牌的更长序列
-    # 数据里 opponent_hands 已由 parse_tenhou 填充，使用真正的 Oracle 蒸馏
-    logger.info("Oracle = full-information model (true oracle distillation)")
+    # Oracle：必须从 train_oracle.py 训练好的 checkpoint 加载
+    # 不允许用 Stage1 权重直接初始化（那样 Oracle 不会利用对手手牌）
+    oracle_ckpt_path = cfg.get("oracle_ckpt", "")
+    if not oracle_ckpt_path or not Path(oracle_ckpt_path).exists():
+        raise FileNotFoundError(
+            f"oracle_ckpt not found: '{oracle_ckpt_path}'\n"
+            "请先运行 train_oracle.py 训练 Oracle，再运行 Stage2。\n"
+            "  python scripts/train_oracle.py configs/oracle_base.yaml"
+        )
+    logger.info(f"Oracle = {oracle_ckpt_path}")
     from rinshan.constants import MAX_ORACLE_SEQ_LEN
     oracle_transformer_cfg = TransformerConfig.from_preset(cfg.get("model_preset", "base"))
-    oracle_transformer_cfg.max_seq_len = MAX_ORACLE_SEQ_LEN   # Oracle 序列更长，含对手手牌
+    oracle_transformer_cfg.max_seq_len = MAX_ORACLE_SEQ_LEN
     oracle_model = RinshanModel(
         transformer_cfg=oracle_transformer_cfg,
-        use_belief=False,  # Oracle 已看全牌，不需要 Belief Net
+        use_belief=False,
         use_aux=False,
     )
-    # Oracle 加载相同的 Stage 1 权重（共享 encoder，RoPE 不含绝对位置 embed，长度 mismatch 安全）
-    oracle_missing, oracle_unexpected = oracle_model.load_state_dict(raw_sd, strict=False)
-    logger.info(f"Oracle loaded — missing: {len(oracle_missing)}  unexpected: {len(oracle_unexpected)}")
+    oracle_raw = torch.load(oracle_ckpt_path, map_location=device, weights_only=True)
+    oracle_sd  = _strip_prefix(oracle_raw.get("model", oracle_raw))
+    oracle_missing, oracle_unexpected = oracle_model.load_state_dict(oracle_sd, strict=False)
+    logger.info(f"Oracle loaded — missing={len(oracle_missing)}  unexpected={len(oracle_unexpected)}")
+    if oracle_missing:
+        logger.warning(f"  Oracle missing keys: {oracle_missing[:4]}")
     trainer.set_oracle_model(oracle_model)
 
     ckpt_dir  = Path(trainer_cfg.save_dir)
@@ -294,45 +216,17 @@ def main():
         best_val_loss = ckpt.get("best_val_loss", float("inf"))
         logger.info(f"Resumed at step {trainer.step}, best_val_loss={best_val_loss:.4f}")
 
-    # ── Oracle 蒸馏信号诊断 + 自动 fine-tune ────────────────────────────
-    kl_threshold = float(cfg.get("oracle_kl_threshold",  0.2))
-    ft_steps     = int(cfg.get("oracle_finetune_steps",  3000))
-    ft_lr        = float(cfg.get("oracle_finetune_lr",   2e-5))
-
+    # ── Oracle KL 诊断（仅做信息展示，不自动 fine-tune）────────────────
     diag_kl, diag_gap = _measure_oracle_kl(trainer, val_ds, batch_size)
     logger.info(
-        f"[diag] Oracle-Student KL={diag_kl:.4f}  Q_abs_gap={diag_gap:.4f}  "
-        f"(threshold={kl_threshold})"
+        f"[diag] Oracle-Student KL={diag_kl:.4f}  Q_abs_gap={diag_gap:.4f}"
     )
-    if diag_kl < kl_threshold:
+    if diag_kl < 0.2:
         logger.warning(
-            f"[diag] ⚠ KL={diag_kl:.4f} < {kl_threshold} — "
-            "Oracle 未充分利用全信息，自动启动 BC fine-tune..."
+            f"[diag] ⚠ KL={diag_kl:.4f} 偏低。"
+            " 请确认 oracle_ckpt 来自 train_oracle.py 的完整训练结果"
+            "（oracle_bc 应 < 0.15）。"
         )
-        finetune_oracle(
-            trainer        = trainer,
-            train_ds       = train_ds,
-            val_ds         = val_ds,
-            batch_size     = batch_size,
-            device         = device,
-            ckpt_dir       = ckpt_dir,
-            finetune_steps = ft_steps,
-            finetune_lr    = ft_lr,
-            num_workers    = cfg.get("num_workers", 4),
-        )
-        # fine-tune 后重新测量，确认信号增强
-        diag_kl_after, _ = _measure_oracle_kl(trainer, val_ds, batch_size)
-        logger.info(
-            f"[diag] Post-finetune KL={diag_kl_after:.4f}  "
-            f"(+{diag_kl_after - diag_kl:+.4f} vs before)"
-        )
-        if diag_kl_after < kl_threshold:
-            logger.warning(
-                f"[diag] ⚠ KL 仍 < {kl_threshold}，蒸馏信号依然偏弱。"
-                f"可尝试增大 oracle_finetune_steps（当前={ft_steps}）后重跑。"
-            )
-        else:
-            logger.info("[diag] ✓ Oracle fine-tune 后信号充足，继续 Stage 2 蒸馏。")
     else:
         logger.info("[diag] ✓ KL 信号充足，Oracle 有效利用全信息，蒸馏可正常进行。")
     # ── end diag ─────────────────────────────────────────────────────────

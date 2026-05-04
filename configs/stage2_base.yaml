@@ -1,36 +1,39 @@
-﻿# Stage 2: Oracle 蒸馏 (真 Oracle，annotated 数据含 opponent_hands)
+# Stage 2: Oracle 蒸馏
+#
+# 前置条件：必须先跑完 train_oracle.py，oracle_bc 收敛到 < 0.15
+#   python scripts/train_oracle.py configs/oracle_base.yaml
+#
+# 然后把 oracle_base/best.pt 的路径填到 oracle_ckpt
 
 stage: 2
 model_preset: base
-stage1_ckpt: checkpoints/stage1_migrated.pt
+stage1_ckpt:  /root/autodl-tmp/rinshan/checkpoints/stage1_base/best_v3.pt
+oracle_ckpt:  /root/autodl-tmp/rinshan/checkpoints/oracle_base/best.pt
 
-data_dir: data/annotated
-val_ratio: 0.02
+data_dir:    /root/autodl-tmp/rinshan/data/annotated_v4
+val_ratio:   0.02
 shuffle_buffer: 15000
 
-lr: 1e-4
+belief_weight:     1.0
+belief_pos_weight: 2.4
+
+lr:           1e-4
 weight_decay: 0.01
 warmup_steps: 500
-total_steps: 100_000
-batch_size: 512
+total_steps:  100000
+batch_size:   640
 grad_accum_steps: 1
 max_grad_norm: 0.5
 compile: false
 
 dtype: bfloat16
-amp: true
+amp:   true
 
-save_dir: checkpoints/stage2_base
+save_dir:   /root/autodl-tmp/rinshan/checkpoints/stage2_base
 save_every: 5000
-log_every: 100
-val_every: 5000
-patience: 8
+log_every:  100
+val_every:  5000
+patience:   8
 
-# Oracle 蒸馏信号诊断 + 自动 fine-tune
-# KL 低于此阈值时自动对 Oracle 做 BC fine-tune，再继续蒸馏
-oracle_kl_threshold: 0.2
-oracle_finetune_steps: 3000   # fine-tune 步数，信号极弱时可调大到 5000
-oracle_finetune_lr: 2e-5      # fine-tune 学习率，比主训练低一个量级
-
-device: cuda
+device:      cuda
 num_workers: 16
