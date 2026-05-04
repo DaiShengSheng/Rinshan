@@ -88,9 +88,11 @@ def stage1_loss(
     opp_tenpai_mask: Optional[torch.Tensor] = None,
     aux_preds: Optional[dict]     = None,
     aux_targets: Optional[dict]   = None,
-    belief_weight: float = 0.3,
+    belief_weight: float = 1.0,       # 提高：BC loss ~0.4，belief loss ~0.55
+                                        # weight=1.0 让 belief 梯度与 BC 同量级
     wait_weight: float   = BELIEF_WAIT_WEIGHT,
     aux_weight: float    = 1.0,
+    belief_pos_weight: float = 2.4,     # 平衡正负样本：有牌频率29% vs 无牌71%
 ) -> tuple[torch.Tensor, dict]:
     """
     行为克隆损失：BC 主损失 + Belief/Wait 辅助 + AuxHead 辅助
@@ -114,6 +116,7 @@ def stage1_loss(
             opp_tenpai_mask=opp_tenpai_mask,
             belief_weight=belief_weight,
             wait_weight=wait_weight,
+            belief_pos_weight=belief_pos_weight,
         )
         total = total + bw_loss
         losses.update(bw_dict)

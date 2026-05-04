@@ -16,6 +16,13 @@ batch_size: 1024          # eff_batch=6144，显存 ~32GB
 grad_accum_steps: 6       # eff_batch=6144
 max_grad_norm: 1.0
 
+# Belief Net 权重
+# belief_weight=1.0: BC loss ~0.4，belief BCE ~0.55
+#   weight=0.3 时 belief 梯度仅占总梯度 ~30%，容易欠拟合
+# belief_pos_weight=2.4: 有牌(29%) vs 无牌(71%)，正负比 ≈ 0.71/0.29 ≈ 2.4
+belief_weight: 1.0
+belief_pos_weight: 2.4
+
 # 精度
 dtype: bfloat16
 amp: true

@@ -252,6 +252,8 @@ class Trainer:
                     aux_targets={k: self._to_device(v)
                                  for k, v in aux_t.items()
                                  if k not in ("opp_wait_tiles", "opp_tenpai_mask")},
+                    belief_weight=getattr(self.cfg, 'belief_weight', 1.0),
+                    belief_pos_weight=getattr(self.cfg, 'belief_pos_weight', 2.4),
                 )
 
             # ── Stage 2: Oracle 蒸馏 ──
