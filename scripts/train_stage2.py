@@ -275,13 +275,17 @@ def main():
         if step % log_every == 0:
             ema_kl    = _ema.get("kl",    float("nan"))
             ema_bc    = _ema.get("bc",    float("nan"))
+            ema_bel   = _ema.get("belief", float("nan"))
+            ema_wait  = _ema.get("wait",   float("nan"))
             ema_score = ema_kl + 0.3 * ema_bc
             logger.info(
                 f"[ema  {step}] "
                 f"kl={ema_kl:.4f}{_trend('kl')}  "
                 f"bc={ema_bc:.4f}{_trend('bc')}  "
+                f"bel={ema_bel:.4f}{_trend('belief')}  "
+                f"wait={ema_wait:.4f}{_trend('wait')}  "
                 f"score(kl+0.3bc)={ema_score:.4f}"
-                + (f"{_trend('kl')}" if "kl" in _ema_prev else "  (warming up)")
+                + ("" if "kl" in _ema_prev else "  (warming up)")
             )
             # 快照当前 EMA，供下一周期计算趋势
             _ema_prev.update(_ema)
@@ -292,23 +296,46 @@ def main():
             val_bc = 0.0
             val_total = 0.0
             n_val = 0
+            val_bel = val_wait = 0.0
+            # belief 准确率（每步算一次，用于判断 BeliefNet 是否收敛）
+            import torch.nn.functional as F
+            bel_tp = bel_total = 0
             with torch.no_grad():
                 for vb in val_loader:
                     _, ld = trainer._forward_and_loss(vb)
                     val_kl    += ld.get("kl", 0.0)
                     val_bc    += ld.get("bc", 0.0)
+                    val_bel   += ld.get("belief", 0.0)
+                    val_wait  += ld.get("wait", 0.0)
                     val_total += ld.get("total", 0.0)
+                    # 顺带算 belief 二分类准确率
+                    s_out = trainer.model(
+                        tokens=trainer._to_device(vb["tokens"]),
+                        candidate_mask=trainer._to_device(vb["candidate_mask"]),
+                        pad_mask=trainer._to_device(vb.get("pad_mask")),
+                        belief_tokens=trainer._to_device(vb.get("belief_tokens")),
+                        belief_pad_mask=trainer._to_device(vb.get("belief_pad_mask")),
+                    )
+                    if s_out.belief_logits is not None and vb.get("actual_hands") is not None:
+                        ah = trainer._to_device(vb["actual_hands"]).float()
+                        pred = (s_out.belief_probs > 0.5).float()
+                        tgt  = (ah > 0).float()
+                        bel_tp    += (pred * tgt).sum().item()
+                        bel_total += tgt.sum().item()
                     n_val += 1
                     if n_val >= 200:
                         break
             trainer.model.train()
             n = max(n_val, 1)
-            val_kl /= n; val_bc /= n; val_total /= n
+            val_kl /= n; val_bc /= n; val_bel /= n; val_wait /= n; val_total /= n
+            bel_recall = bel_tp / max(bel_total, 1)   # 有牌的位置预测对了多少
             val_score = val_kl + 0.3 * val_bc   # KL 主导，BC 作约束
             is_best = val_score < best_val_loss
             best_tag = " ← best" if is_best else ""
             logger.info(
                 f"[val step={step}] kl={val_kl:.4f}  bc={val_bc:.4f}  "
+                f"bel={val_bel:.4f}  wait={val_wait:.4f}  "
+                f"bel_recall={bel_recall:.3f}  "
                 f"score(kl+0.3bc)={val_score:.4f}  total={val_total:.4f}"
                 f"  best={best_val_loss:.4f}  patience={patience_counter}/{patience}{best_tag}"
             )
