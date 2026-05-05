@@ -22,17 +22,19 @@ seed: 42
 # value_weight=1.0 : value regression 与 BC 同量级
 #   → Oracle 既能预测人类动作，也能预测动作的真实价值
 bc_weight:    1.0
-value_weight: 1.0
+value_weight: 0.1    # 第一轮 1.0 时 value loss 抢梯度，降到 0.1 让 bc 优先收敛
 
 # 优化器
-lr:           1e-4
+lr:           3e-5    # 续跑用更小的 lr，避免破坏已有表示
 weight_decay: 0.01
-warmup_steps: 1000
-total_steps:  80000     # Stage2 best.pt 起步 bc~0.15，比 Stage1 少 ~70k 步
-                         # 预计 30-50k 步内 bc 降到 0.10-0.12，50-80k 步充分收敛
+warmup_steps: 200    # 续跑 warmup 短一些
+total_steps:  130000  # 从 step=80000 续跑到 130000（再跑 50k 步）
 batch_size:   640
 grad_accum_steps: 1
 max_grad_norm: 1.0
+
+# 续跑控制
+reset_scheduler: true  # 重置 lr scheduler，从 3e-5 重新 cosine 退火
 
 # 精度
 dtype:  bfloat16

@@ -225,14 +225,20 @@ def main():
     patience       = cfg.get("patience", 10)
 
     best_pt = save_dir / "best.pt"
+    reset_scheduler = cfg.get("reset_scheduler", False)
     if best_pt.exists():
         logger.info(f"Resuming from {best_pt}")
         ckpt = torch.load(best_pt, map_location=device, weights_only=True)
         model.load_state_dict(_strip_prefix(ckpt["model"]))
         optimizer.load_state_dict(ckpt["optimizer"])
-        scheduler.load_state_dict(ckpt["scheduler"])
+        if reset_scheduler:
+            # lr 已跑到底时用此选项重新从 lr 开始 cosine
+            logger.info("reset_scheduler=True — rebuilding scheduler from scratch")
+        else:
+            scheduler.load_state_dict(ckpt["scheduler"])
         step       = ckpt["step"]
         best_score = ckpt.get("best_score", float("inf"))
+        patience_count = 0   # reset patience，给新 lr 机会
         logger.info(f"Resumed at step {step}, best_score={best_score:.4f}")
 
     # ── Loss 权重 ─────────────────────────────────────────────
