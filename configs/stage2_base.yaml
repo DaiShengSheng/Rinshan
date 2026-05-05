@@ -1,9 +1,18 @@
 # Stage 2: Oracle 蒸馏
 #
-# 前置条件：必须先跑完 train_oracle.py，oracle_bc 收敛到 < 0.15
+# 前置条件：必须先跑完 train_oracle.py
 #   python scripts/train_oracle.py configs/oracle_base.yaml
 #
-# 然后把 oracle_base/best.pt 的路径填到 oracle_ckpt
+# ── 收敛目标 ──────────────────────────────────────────────────
+#   指标             起点(Stage1)   及格      目标      失败警告
+#   val KL           ~1.24         < 0.50    < 0.30    > 0.80 不再降
+#   val BC           ~1.38         < 0.80    < 0.50    Stage2训练中反弹升高
+#   score(kl+0.3bc)  —             < 0.75    < 0.45    —
+#
+# score 是 early stopping 主指标（val_score = val_kl + 0.3 * val_bc）
+# KL 是核心：衡量 Student 学到了多少 Oracle 的全信息视角
+# BC  是约束：防止 KL loss 破坏 Student 原有的人类动作预测能力
+# ─────────────────────────────────────────────────────────────
 
 stage: 2
 model_preset: base
