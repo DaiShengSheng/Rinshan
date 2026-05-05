@@ -228,14 +228,19 @@ def main():
     logger.info(
         f"[diag] Oracle-Student KL={diag_kl:.4f}  Q_abs_gap={diag_gap:.4f}"
     )
-    if diag_kl < 0.2:
+    # _measure_oracle_kl 内部用 temperature=2.0 软化分布，正常收敛值约 0.005-0.02
+    # 阈值 0.002：低于此值说明 Oracle 与 Student 几乎无差别，蒸馏信号不足
+    if diag_kl < 0.002:
         logger.warning(
-            f"[diag] ⚠ KL={diag_kl:.4f} 偏低。"
-            " 请确认 oracle_ckpt 来自 train_oracle.py 的完整训练结果"
-            "（oracle_bc 应 < 0.15）。"
+            f"[diag] ⚠ KL={diag_kl:.4f} 极低（temp=2.0 尺度下）。"
+            " Oracle 与 Student 分布几乎相同，蒸馏信号不足。"
+            " 请用 diagnose_oracle.py 确认 oracle_kl（原始尺度）> 0.25。"
         )
     else:
-        logger.info("[diag] ✓ KL 信号充足，Oracle 有效利用全信息，蒸馏可正常进行。")
+        logger.info(
+            f"[diag] ✓ KL={diag_kl:.4f}（temp=2.0）信号充足，蒸馏可正常进行。"
+            " （原始尺度 KL 可用 diagnose_oracle.py 查看）"
+        )
     # ── end diag ─────────────────────────────────────────────────────────
 
     logger.info(f"Starting Stage 2 (self-distillation) for {total_steps} steps")
