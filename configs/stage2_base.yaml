@@ -3,15 +3,15 @@
 # 前置条件：必须先跑完 train_oracle.py
 #   python scripts/train_oracle.py configs/oracle_base.yaml
 #
-# ── 收敛目标 ──────────────────────────────────────────────────
-#   指标             起点(Stage1)   及格      目标      失败警告
-#   val KL           ~1.24         < 0.50    < 0.30    > 0.80 不再降
-#   val BC           ~1.38         < 0.80    < 0.50    Stage2训练中反弹升高
-#   score(kl+0.3bc)  —             < 0.75    < 0.45    —
+# ── 收敛目标（training log 里的量级，temperature=2.0 软化后）──────
+#   指标                  step~7k 实测   及格      目标      失败警告
+#   val KL  (temp=2.0)    ~0.05         < 0.03    < 0.01    > 0.05 不再下降
+#   val BC                ~0.19         < 0.15    < 0.12    反弹 > 0.25
+#   score (kl+0.3*bc)     ~0.07         < 0.05    < 0.04    —
 #
-# score 是 early stopping 主指标（val_score = val_kl + 0.3 * val_bc）
-# KL 是核心：衡量 Student 学到了多少 Oracle 的全信息视角
-# BC  是约束：防止 KL loss 破坏 Student 原有的人类动作预测能力
+# 注：diagnose_oracle.py 输出的 KL≈1.24 是未经 temperature 软化的原始值，
+#     训练 log 里的 kl 已除以 temperature=2.0，两者不可直接对比。
+#     score = val_kl + 0.3 * val_bc 是 early stopping 主指标。
 # ─────────────────────────────────────────────────────────────
 
 stage: 2
