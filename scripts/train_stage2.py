@@ -32,6 +32,13 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 logger = logging.getLogger("train_stage2")
 
 
+def _strip_prefix(sd: dict) -> dict:
+    """剥掉 torch.compile 保存的 _orig_mod. 前缀"""
+    if any(k.startswith("_orig_mod.") for k in sd):
+        sd = {k.replace("_orig_mod.", "", 1): v for k, v in sd.items()}
+    return sd
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Oracle 诊断 + 自动 fine-tune
 # ─────────────────────────────────────────────────────────────────────────────
