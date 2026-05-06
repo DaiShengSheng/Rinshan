@@ -601,6 +601,7 @@ def evaluate_versus_strength(args, log_dir_override=None) -> dict:
     t0 = time.time()
     _LIBRIICHI_HAND_ERRS = ("is not in hand", "cannot tsumogiri", "not a hora hand")
     while generated < n_games:
+        this_wave = min(wave, n_games - generated)
         try:
             results = arena.py_vs_py(agent_ch, agent_bl, (args.seed + generated, 0), this_wave // 2)
             all_results.extend(results)
@@ -609,6 +610,9 @@ def evaluate_versus_strength(args, log_dir_override=None) -> dict:
             if any(tag in str(e) for tag in _LIBRIICHI_HAND_ERRS):
                 skipped += 1
                 generated += 1
+                if not args.quiet:
+                    print(f"\n[warn] libriichi hand-state bug @ seed={args.seed + generated - 1}"
+                          f"，已跳过（共跳过 {skipped} 局）", flush=True)
             else:
                 raise
 
