@@ -226,9 +226,17 @@ def main():
 
     best_pt = save_dir / "best.pt"
     reset_scheduler = cfg.get("reset_scheduler", False)
-    if best_pt.exists():
-        logger.info(f"Resuming from {best_pt}")
-        ckpt = torch.load(best_pt, map_location=device, weights_only=True)
+
+    # 优先用编号最大的 checkpoint 续跑，best.pt 只追踪最优，不用于 resume
+    existing = sorted(
+        save_dir.glob("checkpoint_*.pt"),
+        key=lambda p: int(p.stem.split("_")[-1])
+    )
+    resume_pt = existing[-1] if existing else (best_pt if best_pt.exists() else None)
+
+    if resume_pt and resume_pt.exists():
+        logger.info(f"Resuming from {resume_pt}")
+        ckpt = torch.load(resume_pt, map_location=device, weights_only=True)
         model.load_state_dict(_strip_prefix(ckpt["model"]))
         optimizer.load_state_dict(ckpt["optimizer"])
         if reset_scheduler:
