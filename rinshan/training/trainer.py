@@ -480,7 +480,7 @@ class Trainer:
             ):
                 p_tgt.data.mul_(1 - tau).add_(tau * p_src.data)
 
-    def save(self, path: Path):
+    def save(self, path: Path, extra: dict | None = None):
         if self.cfg.weights_only_save:
             payload = {
                 "step":         self.step,
@@ -502,6 +502,8 @@ class Trainer:
             }
         # 把训练 lr 存进去，重启时自动检测是否需要 reset
         payload["lr"] = self.cfg.lr
+        if extra:
+            payload.update(extra)
         torch.save(payload, path)
         logger.info(f"Saved checkpoint → {path}")
 

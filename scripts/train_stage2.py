@@ -221,8 +221,9 @@ def main():
         trainer.optimizer.load_state_dict(ckpt["optimizer"])
         trainer.scheduler.load_state_dict(ckpt["scheduler"])
         trainer.step = ckpt["step"]
-        best_val_loss = ckpt.get("best_val_loss", float("inf"))
-        logger.info(f"Resumed at step {trainer.step}, best_val_loss={best_val_loss:.4f}")
+        best_val_loss    = ckpt.get("best_val_loss",    float("inf"))
+        patience_counter = ckpt.get("patience_counter", 0)
+        logger.info(f"Resumed at step {trainer.step}, best_val_loss={best_val_loss:.4f}, patience={patience_counter}/{patience}")
 
     # ── Oracle KL 诊断（仅做信息展示，不自动 fine-tune）────────────────
     diag_kl, diag_gap = _measure_oracle_kl(trainer, val_ds, batch_size)
@@ -276,6 +277,16 @@ def main():
         loss_dict = trainer.train_step(batch)
         step = trainer.step
         _update_ema(loss_dict)
+
+        # 定期保存后，把 best_val_loss / patience_counter 追加进 checkpoint
+        # （trainer.save() 内部不知道这两个变量，在此 patch）
+        if step % save_every == 0:
+            ckpt_path = ckpt_dir / f"checkpoint_{step}.pt"
+            if ckpt_path.exists():
+                patch = torch.load(ckpt_path, map_location="cpu", weights_only=True)
+                patch["best_val_loss"]   = best_val_loss
+                patch["patience_counter"] = patience_counter
+                torch.save(patch, ckpt_path)
 
         # EMA 摘要行：每 log_every 步追加一行趋势，紧跟 trainer 内部的瞬时 log
         if step % log_every == 0:
