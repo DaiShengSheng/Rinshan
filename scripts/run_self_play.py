@@ -599,8 +599,7 @@ def evaluate_versus_strength(args, log_dir_override=None) -> dict:
     generated = 0
     skipped = 0
     t0 = time.time()
-    _LIBRIICHI_HAND_ERRS = ("is not in hand", "cannot tsumogiri")
-    while generated < n_games:
+    _LIBRIICHI_HAND_ERRS = ("is not in hand", "cannot tsumogiri", "not a hora hand")
         this_wave = min(wave, n_games - generated)
         try:
             results = arena.py_vs_py(agent_ch, agent_bl, (args.seed + generated, 0), this_wave // 2)
@@ -727,7 +726,7 @@ def run_rust_selfplay(args) -> None:
     # 原因是 libriichi 下发给 Python 的 start_kyoku.tehais 与
     # Rust 内部实际手牌存在间歇性不一致。
     # workaround：跳过触发该 bug 的 seed（通常 <1%），继续生成后续局。
-    _LIBRIICHI_HAND_ERRS = ("is not in hand", "cannot tsumogiri")
+    _LIBRIICHI_HAND_ERRS = ("is not in hand", "cannot tsumogiri", "not a hora hand")
 
     while generated < args.n_games:
         this_wave = min(args.parallel_games, args.n_games - generated)
