@@ -334,7 +334,7 @@ fn furiten() {
     });
     assert!(!ps.at_furiten);
     assert!(cans.can_ron_agari);
-    assert_eq!(ps.agari_points(true, &[]).unwrap().ron, 5800);
+    assert_eq!(ps.agari_points(true, &[], false).unwrap().ron, 5800);
 
     // riichi furiten test
     let cans = ps.test_update(&Event::Tsumo {
@@ -473,7 +473,7 @@ fn furiten() {
     assert!(ps.waits[0] && ps.waits[3] && ps.waits[6]);
     assert!(ps.at_furiten);
     assert!(cans.can_tsumo_agari);
-    assert_eq!(ps.agari_points(false, &[t!(3m)]).unwrap().tsumo_ko, 6000);
+    assert_eq!(ps.agari_points(false, &[t!(3m)], false).unwrap().tsumo_ko, 6000);
 }
 
 #[test]
@@ -1384,7 +1384,7 @@ fn double_chankan_ron() {
     let cans = ps_kakan
         .test_update_json(r#"{"type":"kakan","actor":3,"pai":"2m","consumed":["2m","2m","2m"]}"#);
     assert!(cans.can_ron_agari);
-    assert_eq!(ps_kakan.agari_points(true, &[]).unwrap().ron, 1000);
+    assert_eq!(ps_kakan.agari_points(true, &[], ps_kakan.has_chankan_chance()).unwrap().ron, 1000);
 
     let cans = ps.test_update_json(r#"{"type":"dahai","actor":3,"pai":"2m","tsumogiri":true}"#);
     assert!(!cans.can_ron_agari);

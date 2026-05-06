@@ -214,7 +214,7 @@ fn process_path(path: &Path) -> Result<()> {
                     .context("missing field `ura_markers`")?;
                 let deltas = deltas.context("missing field `deltas`")?;
                 let points = states[*actor as usize]
-                    .agari_points(is_ron, ura)
+                    .agari_points(is_ron, ura, states[*actor as usize].has_chankan_chance())
                     .with_context(|| {
                         format!(
                             "failed to get agari points at line {line}\naction: {ev:?}\nstate:\n{}",

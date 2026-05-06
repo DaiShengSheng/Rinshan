@@ -613,7 +613,7 @@ impl<'a> ObsEncoderContext<'a> {
                 // Use the minimal tsumo agari point as the max EV. It is
                 // minimal because we assume no uradora.
                 let min_tsumo_agari = state
-                    .agari_points(cans.can_ron_agari, &[])
+                    .agari_points(cans.can_ron_agari, &[], state.has_chankan_chance())
                     .map(|p| p.tsumo_total(state.is_oya()) as f32)
                     .unwrap_or_default();
                 self.encode_ev(min_tsumo_agari);

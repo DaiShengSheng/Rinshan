@@ -18,6 +18,17 @@ impl PlayerState {
         self.minkans.len() + self.ankans.len()
     }
 
+    /// Returns whether this player currently has a pending chankan (槍槓) win
+    /// opportunity.  Exposed so that `BoardState` can snapshot this flag
+    /// *before* broadcasting the Hora event (which would call
+    /// `chankan_chance.take()` in `update_inner` and clear it prematurely).
+    #[inline]
+    #[must_use]
+    pub fn has_chankan_chance(&self) -> bool {
+        self.chankan_chance.is_some()
+    }
+
+
     /// Used by `Agent` impls, must be called at 3n+2.
     #[must_use]
     pub fn discard_candidates(&self) -> [bool; 34] {
@@ -323,10 +334,10 @@ impl PlayerState {
 
             // `unwrap` is safe because there is a condition guard in
             // `rule_based_agari`.
-            self.agari_points(is_ron, &ura_indicators).unwrap()
+            self.agari_points(is_ron, &ura_indicators, self.chankan_chance.is_some()).unwrap()
         } else {
             // ditto
-            self.agari_points(is_ron, &[]).unwrap()
+            self.agari_points(is_ron, &[], self.chankan_chance.is_some()).unwrap()
         };
 
         // Calculate the best post-hora situation for us.
@@ -374,7 +385,18 @@ impl PlayerState {
     /// change.
     ///
     /// `ura_indicators` is used only when the actor has an accepted riichi.
-    pub fn agari_points(&self, is_ron: bool, ura_indicators: &[Tile]) -> Result<Point> {
+    /// `is_chankan`: whether this agari is a chankan (槍槓) win. Must be
+    /// supplied by the caller because `self.chankan_chance` may already have
+    /// been consumed by a subsequent `update()` call before this function is
+    /// reached (e.g. the arena broadcasts the Hora event to all PlayerStates
+    /// before calling `agari_points`, which causes `chankan_chance.take()` to
+    /// fire in `update_inner` and clear the flag prematurely).
+    pub fn agari_points(
+        &self,
+        is_ron: bool,
+        ura_indicators: &[Tile],
+        is_chankan: bool,
+    ) -> Result<Point> {
         ensure!(
             is_ron && self.last_cans.can_ron_agari || self.last_cans.can_tsumo_agari,
             "cannot agari"
@@ -395,11 +417,13 @@ impl PlayerState {
 
         let additional_hans = if is_ron {
             [
-                self.riichi_accepted[0],       // 立直
-                self.is_w_riichi,              // 両立直
-                self.at_ippatsu,               // 一发
-                self.tiles_left == 0,          // 河底撈魚
-                self.chankan_chance.is_some(), // 槍槓
+                self.riichi_accepted[0], // 立直
+                self.is_w_riichi,        // 両立直
+                self.at_ippatsu,         // 一发
+                self.tiles_left == 0,    // 河底撈魚
+                // Use the caller-supplied flag instead of self.chankan_chance
+                // (which may have been cleared by a prior update() call).
+                is_chankan,              // 槍槓
             ]
             .iter()
             .filter(|&&b| b)

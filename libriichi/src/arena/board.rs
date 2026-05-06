@@ -368,6 +368,12 @@ impl BoardState {
         single_actor: u8,
         single_target: u8,
         reactions: &[EventExt; 4],
+        // Which players had a chankan opportunity at the moment the Hora was
+        // declared.  We snapshot this BEFORE broadcasting the Hora event
+        // because broadcast() calls PlayerState::update() which runs
+        // `chankan_chance.take()` in update_inner(), wiping the flag before
+        // agari_points() gets a chance to read it.
+        chankan_actors: [bool; 4],
     ) -> Result<()> {
         self.has_hora = true;
 
@@ -386,7 +392,11 @@ impl BoardState {
                 Event::Hora { actor, .. } => {
                     self.can_renchan |= actor == self.oya;
                     let point =
-                        self.player_states[actor as usize].agari_points(is_ron, &ura_indicators);
+                        self.player_states[actor as usize].agari_points(
+                            is_ron,
+                            &ura_indicators,
+                            chankan_actors[actor as usize],
+                        );
                     Some(point).transpose()
                 }
                 _ => Ok(None),
@@ -656,7 +666,12 @@ impl BoardState {
             }
 
             Event::Hora { actor, target, .. } => {
-                self.handle_hora(actor, target, reactions)?;
+                // Snapshot chankan_chance for all players BEFORE broadcast,
+                // because broadcast() → update_inner() calls chankan_chance.take()
+                // which would wipe the flag before agari_points() reads it.
+                let chankan_actors =
+                    std::array::from_fn(|i| self.player_states[i].has_chankan_chance());
+                self.handle_hora(actor, target, reactions, chankan_actors)?;
                 return Ok(Poll::End);
             }
 
