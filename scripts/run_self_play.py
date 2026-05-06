@@ -600,7 +600,7 @@ def evaluate_versus_strength(args, log_dir_override=None) -> dict:
     skipped = 0
     t0 = time.time()
     _LIBRIICHI_HAND_ERRS = ("is not in hand", "cannot tsumogiri", "not a hora hand")
-        this_wave = min(wave, n_games - generated)
+    while generated < n_games:
         try:
             results = arena.py_vs_py(agent_ch, agent_bl, (args.seed + generated, 0), this_wave // 2)
             all_results.extend(results)
