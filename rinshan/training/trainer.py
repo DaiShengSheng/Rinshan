@@ -519,8 +519,11 @@ class Trainer:
                 f"weights loaded, optimizer/scheduler reset"
             )
         else:
-            # lr 一致：完整恢复，保证续训连续
-            self.optimizer.load_state_dict(ckpt["optimizer"])
-            self.scheduler.load_state_dict(ckpt["scheduler"])
-            self.scaler.load_state_dict(ckpt["scaler"])
+            # lr 一致：完整恢复；若是 weights_only checkpoint，则仅恢复权重
+            if all(k in ckpt for k in ("optimizer", "scheduler", "scaler")):
+                self.optimizer.load_state_dict(ckpt["optimizer"])
+                self.scheduler.load_state_dict(ckpt["scheduler"])
+                self.scaler.load_state_dict(ckpt["scaler"])
+            else:
+                logger.info("weights-only checkpoint detected: optimizer/scheduler/scaler kept freshly initialized")
         logger.info(f"Loaded checkpoint ← {path} (step {self.step}, lr={self.cfg.lr:.2e})")

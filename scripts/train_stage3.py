@@ -176,6 +176,8 @@ def main():
         ckpt_dir.glob("checkpoint_*.pt"),
         key=lambda p: int(p.stem.split("_")[-1]),
     )
+    best_val_path  = ckpt_dir / "best_val.pt"
+    best_gate_path = ckpt_dir / "best.pt"
     if existing_ckpts:
         latest = existing_ckpts[-1]
         # 只 peek lr，不做完整 load
@@ -183,9 +185,8 @@ def main():
         ckpt_lr = peek.get("lr", None)
         lr_changed = ckpt_lr is not None and abs(ckpt_lr - trainer_cfg.lr) > 1e-12
         if lr_changed:
-            # lr 有变化：优先从 best.pt 加载权重（val 最优），没有才用最新 checkpoint
-            best_path = ckpt_dir / "best.pt"
-            src = best_path if best_path.exists() else latest
+            # lr 有变化：优先从 best.pt / best_val.pt 加载权重，没有才用最新 checkpoint
+            src = best_gate_path if best_gate_path.exists() else (best_val_path if best_val_path.exists() else latest)
             logger.info(f"lr changed ({ckpt_lr:.2e} → {trainer_cfg.lr:.2e}): loading weights from {src}")
         else:
             src = latest
@@ -213,6 +214,21 @@ def main():
     val_every   = int(cfg.get("val_every", 2000))
     best_val_loss = float("inf")
     best_gate_delta = float("inf")
+    # 恢复历史 best 指标，避免重启后“第一次 val 必定 best”
+    if best_val_path.exists():
+        try:
+            best_val_ckpt = torch.load(best_val_path, map_location="cpu", weights_only=True)
+            best_val_loss = float(best_val_ckpt.get("best_val_loss", best_val_loss))
+            logger.info(f"Restored best_val_loss={best_val_loss:.4f} from {best_val_path}")
+        except Exception as e:
+            logger.warning(f"Failed to restore best_val_loss from {best_val_path}: {e}")
+    if best_gate_path.exists():
+        try:
+            best_gate_ckpt = torch.load(best_gate_path, map_location="cpu", weights_only=True)
+            best_gate_delta = float(best_gate_ckpt.get("best_gate_delta", best_gate_delta))
+            logger.info(f"Restored best_gate_delta={best_gate_delta:.4f} from {best_gate_path}")
+        except Exception as e:
+            logger.warning(f"Failed to restore best_gate_delta from {best_gate_path}: {e}")
 
     # 检查 grp_reward 是否存在
     # 取第一个样本验证
@@ -309,23 +325,38 @@ def main():
                 + "  ".join(f"{k}={avgs[k]:.4f}" for k in val_keys if avgs[k] != 0.0)
                 + f"  bel_recall={bel_recall:.3f}"
             )
-            if val_loss < best_val_loss:
+            is_best_val = val_loss < best_val_loss
+            if is_best_val:
                 best_val_loss = val_loss
                 trainer.save(ckpt_dir / "best_val.pt")
+                # 把历史 best 指标写进 best_val.pt，供重启恢复
+                best_val_ckpt = torch.load(ckpt_dir / "best_val.pt", map_location="cpu", weights_only=True)
+                best_val_ckpt["best_val_loss"] = best_val_loss
+                best_val_ckpt["best_gate_delta"] = best_gate_delta
+                torch.save(best_val_ckpt, ckpt_dir / "best_val.pt")
 
-            if cfg.get("arena_gate_games", 0):
+            # 推荐改：只有 val 创新低时才跑 arena gate，减少 Stage3 训练耗时
+            if cfg.get("arena_gate_games", 0) and is_best_val:
                 gate_ckpt = ckpt_dir / f"gate_eval_step{step}.pt"
                 trainer.save(gate_ckpt)
                 passed, gate_metrics = _arena_gate(cfg, gate_ckpt, step, ckpt_dir)
                 if passed and gate_metrics.get("delta_rank", float("inf")) < best_gate_delta:
                     best_gate_delta = gate_metrics["delta_rank"]
                     trainer.save(ckpt_dir / "best.pt")
+                    best_gate_ckpt = torch.load(ckpt_dir / "best.pt", map_location="cpu", weights_only=True)
+                    best_gate_ckpt["best_val_loss"] = best_val_loss
+                    best_gate_ckpt["best_gate_delta"] = best_gate_delta
+                    torch.save(best_gate_ckpt, ckpt_dir / "best.pt")
                 try:
                     gate_ckpt.unlink()
                 except FileNotFoundError:
                     pass
-            elif val_loss < best_val_loss:
+            elif is_best_val:
                 trainer.save(ckpt_dir / "best.pt")
+                best_ckpt = torch.load(ckpt_dir / "best.pt", map_location="cpu", weights_only=True)
+                best_ckpt["best_val_loss"] = best_val_loss
+                best_ckpt["best_gate_delta"] = best_gate_delta
+                torch.save(best_ckpt, ckpt_dir / "best.pt")
 
     logger.info("Stage 3 complete")
     trainer.save(ckpt_dir / "final.pt")
