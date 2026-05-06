@@ -251,7 +251,8 @@ def main():
     _ema_alpha = 0.05           # 越小越平滑，约等于最近 20 步平均
     _ema:      dict[str, float] = {}
     _ema_prev: dict[str, float] = {}   # 上一个 log_every 周期的 EMA，用于算方向
-    log_every = int(cfg.get("log_every", 100))
+    log_every  = int(cfg.get("log_every",  100))
+    save_every = int(cfg.get("save_every", 5000))
 
     def _update_ema(d: dict) -> None:
         for k, v in d.items():
