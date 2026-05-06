@@ -221,6 +221,22 @@ def main():
     logger.info(f"Starting Stage 3 (IQL) for {total_steps} steps")
 
     step = 0
+    _ema: dict[str, float] = {}
+    _ema_prev: dict[str, float] = {}
+    _ema_alpha = 0.05
+
+    def _update_ema(d: dict) -> None:
+        for k, v in d.items():
+            if isinstance(v, float):
+                _ema[k] = v if k not in _ema else (1 - _ema_alpha) * _ema[k] + _ema_alpha * v
+
+    def _trend(key: str) -> str:
+        if key not in _ema or key not in _ema_prev:
+            return ""
+        delta = _ema[key] - _ema_prev[key]
+        if delta < -0.001: return "↓"
+        if delta >  0.001: return "↑"
+        return "→"
     for batch in train_loader:
         if step >= total_steps:
             break
@@ -239,22 +255,60 @@ def main():
 
         loss_dict = trainer.train_step(batch)
         step = trainer.step
+        _update_ema(loss_dict)
+
+        # EMA 摘要行
+        log_every = int(cfg.get("log_every", 100))
+        if step % log_every == 0:
+            ema_keys = [("q_loss","q"),("v_loss","v"),("bc","bc"),
+                        ("belief","bel"),("wait","wait"),("total","total")]
+            ema_parts = "  ".join(
+                f"{s}={_ema[k]:.4f}{_trend(k)}"
+                for k, s in ema_keys if k in _ema
+            )
+            logger.info(f"[ema  {step}] {ema_parts}" + ("" if _ema_prev else "  (warming up)"))
+            _ema_prev.update(_ema)
 
         if step % val_every == 0:
-            # 验证集 IQL 损失
+            # 验证集 IQL 损失 + belief 召回率
             trainer.model.eval()
-            val_loss = 0.0
+            val_keys = ["q_loss", "v_loss", "bc", "cql", "belief", "wait", "total"]
+            val_sums: dict[str, float] = {k: 0.0 for k in val_keys}
+            import torch.nn.functional as F
+            bel_tp = bel_total = 0
             n_val = 0
             with torch.no_grad():
                 for vb in val_loader:
                     _, ld = trainer._forward_and_loss(vb)
-                    val_loss += ld["total"]
+                    for k in val_keys:
+                        val_sums[k] += ld.get(k, 0.0)
+                    # belief 召回率
+                    s_out = trainer.model(
+                        tokens=trainer._to_device(vb["tokens"]),
+                        candidate_mask=trainer._to_device(vb["candidate_mask"]),
+                        pad_mask=trainer._to_device(vb.get("pad_mask")),
+                        belief_tokens=trainer._to_device(vb.get("belief_tokens")),
+                        belief_pad_mask=trainer._to_device(vb.get("belief_pad_mask")),
+                    )
+                    if s_out.belief_logits is not None and vb.get("actual_hands") is not None:
+                        ah   = trainer._to_device(vb["actual_hands"]).float()
+                        pred = (s_out.belief_probs > 0.5).float()
+                        tgt  = (ah > 0).float()
+                        bel_tp    += (pred * tgt).sum().item()
+                        bel_total += tgt.sum().item()
                     n_val += 1
-                    if n_val >= 20:
+                    if n_val >= 50:
                         break
             trainer.model.train()
-            val_loss /= max(n_val, 1)
-            logger.info(f"[val step={step}] val_loss={val_loss:.4f}")
+            n = max(n_val, 1)
+            bel_recall = bel_tp / max(bel_total, 1)
+            avgs = {k: val_sums[k] / n for k in val_keys}
+            val_loss = avgs["total"]
+            logger.info(
+                f"[val step={step}] "
+                + "  ".join(f"{k}={avgs[k]:.4f}" for k in val_keys if avgs[k] != 0.0)
+                + f"  bel_recall={bel_recall:.3f}"
+            )
             if val_loss < best_val_loss:
                 best_val_loss = val_loss
                 trainer.save(ckpt_dir / "best_val.pt")

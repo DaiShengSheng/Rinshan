@@ -1,11 +1,27 @@
 ﻿# Stage 3: 离线 IQL
+#
+# 前置条件：
+#   1. train_oracle.py       → oracle_base/best.pt
+#   2. train_stage1/2.py     → stage2_base/best.pt（Stage3 初始化权重）
+#   3. train_grp.py          → grp 模型
+#   4. fill_grp_rewards.py   → data/annotated_grp（填入 grp_reward 字段）
+#
+# ── 收敛目标 ──────────────────────────────────────────────────
+#   指标            说明                       目标
+#   val q_loss      Bellman Q 误差             持续下降，稳定 < 5.0
+#   val v_loss      expectile V 误差           持续下降，稳定 < 5.0
+#   val bc          AWR BC anchor loss         < 0.25（不应比 Stage2 的 0.19 高太多）
+#   val bel_recall  BeliefNet 手牌召回率       > 0.85（Stage2 末 ~0.79，Stage3 继续提升）
+#   val wait        待张预测 BCE               持续下降（wait_weight=0.5 放开训练）
+#   arena delta     vs Stage2 baseline 顺位差  <= 0.0（challenger 顺位不高于 baseline）
+# ─────────────────────────────────────────────────────────────
 
 stage: 3
 model_preset: base
-stage1_ckpt: checkpoints/stage1_base/best.pt
-stage2_ckpt: checkpoints/stage2_base/best.pt
+stage1_ckpt: /root/autodl-tmp/rinshan/checkpoints/stage1_base/best_v3.pt
+stage2_ckpt: /root/autodl-tmp/rinshan/checkpoints/stage2_base/best.pt
 
-data_dir: data/annotated_grp
+data_dir: /root/autodl-tmp/rinshan/data/annotated_grp
 # 注意：GRP 2.0 不再把每局 reward 广播到所有 action。
 # MjaiDataset(stage=3) 会仅在 GRP 游戏状态变化时把 reward 记到该局最后一个 action。
 val_ratio: 0.02
@@ -20,12 +36,12 @@ batch_size: 1024          # compile=True 下 93GB/96GB，effective batch=2048
 grad_accum_steps: 2       # 等效 batch=1024
 max_grad_norm: 1.0
 
-# CQL 稳定性保护（spike 过一次，小幅降权重）
-cql_weight: 0.1     # 凤凰桌专家数据，质量高，弱化保守约束
-bc_weight: 0.2      # GRP 2.0: advantage-weighted BC anchor
-reward_clip: 20.0   # GRP 2.0: shaped reward clip
-value_clip: 50.0    # Stage3 value/q clip
-adv_clip: 20.0      # AWR advantage clip
+# CQL 稳定性保护
+cql_weight: 0.1
+bc_weight: 0.2
+reward_clip: 20.0
+value_clip: 50.0
+adv_clip: 20.0
 awr_temperature: 3.0
 awr_max_weight: 20.0
 game_expectile: 0.95
@@ -33,18 +49,24 @@ hand_expectile: 0.70
 game_reward_weight: 1.0
 hand_reward_weight: 1.0
 
+# Belief/Wait 权重
+# Stage2 用 wait_weight=0.1 预热 wait_head，Stage3 放开到 0.5
+belief_weight:     1.0
+belief_pos_weight: 2.4
+wait_weight:       0.5   # Stage3：wait_head 已预热，提高权重让待张预测充分收敛
+
 # IQL 超参
 target_update_every: 100
 arena_gate_games: 200
 arena_parallel_games: 64
 arena_gate_rank_delta_threshold: 0.0
-arena_gate_baseline_ckpt: checkpoints/stage2_base/best.pt
+arena_gate_baseline_ckpt: /root/autodl-tmp/rinshan/checkpoints/stage2_base/best.pt
 
 dtype: bfloat16
 amp: true
 compile: true
 
-save_dir: checkpoints/stage3_base
+save_dir: /root/autodl-tmp/rinshan/checkpoints/stage3_base
 save_every: 5000
 log_every: 100
 val_every: 2000

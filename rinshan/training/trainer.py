@@ -340,7 +340,7 @@ class Trainer:
                 elif self.cfg.cql_weight >= 0:
                     extra_kwargs["cql_weight"] = self.cfg.cql_weight  # yaml 覆盖
 
-                return iql_loss(
+                total, losses = iql_loss(
                     q=out.q,
                     v=out.v,
                     v_next=next_out.v,
@@ -370,6 +370,33 @@ class Trainer:
                     hand_reward_weight=self.cfg.hand_reward_weight,
                     **extra_kwargs,
                 )
+
+                # ── Stage3 Belief + Wait 辅助损失 ────────────────────────────
+                # Stage2 用 wait_weight=0.1 预热了 wait_head，Stage3 放开到 0.5
+                from .losses import belief_and_wait_loss
+                from rinshan.constants import BELIEF_WAIT_WEIGHT
+                aux_t        = batch.get("aux_targets", {})
+                actual_hands = batch.get("actual_hands")
+                opp_wait     = aux_t.get("opp_wait_tiles")
+                opp_mask     = aux_t.get("opp_tenpai_mask")
+                has_belief   = out.belief_logits is not None and actual_hands is not None
+                has_wait     = out.wait_logits   is not None and opp_wait     is not None
+                if has_belief or has_wait:
+                    bw_loss, bw_dict = belief_and_wait_loss(
+                        belief_logits   = out.belief_logits if has_belief else None,
+                        wait_logits     = out.wait_logits   if has_wait   else None,
+                        actual_hands    = self._to_device(actual_hands).float() if has_belief else None,
+                        opp_wait_tiles  = self._to_device(opp_wait).float()     if has_wait   else None,
+                        opp_tenpai_mask = self._to_device(opp_mask).float() if opp_mask is not None else None,
+                        belief_weight   = getattr(self.cfg, 'belief_weight', 1.0),
+                        wait_weight     = getattr(self.cfg, 'wait_weight', BELIEF_WAIT_WEIGHT),
+                        belief_pos_weight = getattr(self.cfg, 'belief_pos_weight', 2.4),
+                    )
+                    total = total + bw_loss
+                    losses.update(bw_dict)
+
+                losses["total"] = total.item()
+                return total, losses
 
             else:
                 raise ValueError(f"Stage {self.cfg.stage} not implemented in Trainer")
@@ -415,8 +442,18 @@ class Trainer:
                     for k, short in s2_keys if k in loss_dict
                 )
                 logger.info(f"[step {self.step}] {parts}  lr={lr:.2e}")
+            elif self.cfg.stage == 3:
+                # Stage 3 专用：显示 IQL 主分量 + belief/wait 辅助
+                s3_keys = [("q_loss", "q"), ("v_loss", "v"), ("bc", "bc"),
+                           ("cql", "cql"), ("belief", "bel"), ("wait", "wait"),
+                           ("total", "total")]
+                parts3 = "  ".join(
+                    f"{short}={loss_dict[k]:.4f}"
+                    for k, short in s3_keys if k in loss_dict
+                )
+                logger.info(f"[step {self.step}] {parts3}  lr={lr:.2e}")
             else:
-                # Stage 1 / 3 原有逻辑
+                # Stage 1 原有逻辑
                 aux_keys = ["action", "belief", "aux_shanten", "aux_tenpai_prob",
                             "aux_deal_in_risk", "aux_opp_tenpai"]
                 aux_parts = "  ".join(
