@@ -4,14 +4,15 @@
 #   python scripts/train_oracle.py configs/oracle_base.yaml
 #
 # ── 收敛目标（training log 里的量级，temperature=2.0 软化后）──────
-#   指标                  step~7k 实测   及格      目标      失败警告
-#   val KL  (temp=2.0)    ~0.05         < 0.03    < 0.01    > 0.05 不再下降
-#   val BC                ~0.19         < 0.15    < 0.12    反弹 > 0.25
-#   score (kl+0.3*bc)     ~0.07         < 0.05    < 0.04    —
+#   指标                  step~25k 实测  及格      目标      失败警告
+#   val KL  (temp=2.0)    ~0.008        < 0.006   < 0.005   > 0.012 不再下降
+#   val BC                ~0.187        < 0.185   < 0.180   反弹 > 0.25
+#   score (kl+0.3*bc)     ~0.064        < 0.060   < 0.057   —（理论下限 ≈ 0.057）
+#   bel_recall            ~0.785        > 0.820   > 0.850   < 0.750 说明 belief 未收敛
 #
-# 注：diagnose_oracle.py 输出的 KL≈1.24 是未经 temperature 软化的原始值，
-#     训练 log 里的 kl 已除以 temperature=2.0，两者不可直接对比。
-#     score = val_kl + 0.3 * val_bc 是 early stopping 主指标。
+# 注：score 理论下限 = min_KL + 0.3×BC_floor ≈ 0 + 0.3×0.19 = 0.057
+#     BC_floor 与 Oracle bc=0.20 相同，Student 已逼近全信息上限，正常现象。
+#     bel_recall 是判断 BeliefNet 是否真正收敛的核心指标。
 # ─────────────────────────────────────────────────────────────
 
 stage: 2
@@ -25,6 +26,7 @@ shuffle_buffer: 15000
 
 belief_weight:     1.0
 belief_pos_weight: 2.4
+wait_weight:       0.1   # wait_head 从零初始化，Stage2 先低权重预热，Stage3 再专训
 
 lr:           1e-4
 weight_decay: 0.01

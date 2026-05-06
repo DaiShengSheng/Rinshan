@@ -287,6 +287,8 @@ class Trainer:
                     # pos_weight=2.4：对手每张牌实际有牌频率≈29%，无牌≈71%
                     # 正负比 ≈ 0.71/0.29 ≈ 2.4，用 pos_weight 平衡 BCE
                     # belief_weight=1.0：让 Belief 梯度与蒸馏 loss 同量级
+                    # wait_weight 在 Stage2 设小一点（yaml 里 wait_weight=0.1），
+                    # 避免从零初始化的 wait_head 抢走 belief 的梯度
                     bw_loss, bw_dict = belief_and_wait_loss(
                         belief_logits  = out.belief_logits if has_belief else None,
                         wait_logits    = out.wait_logits   if has_wait   else None,
@@ -294,7 +296,7 @@ class Trainer:
                         opp_wait_tiles = self._to_device(opp_wait).float()     if has_wait   else None,
                         opp_tenpai_mask= self._to_device(opp_mask).float() if opp_mask is not None else None,
                         belief_weight  = getattr(self.cfg, 'belief_weight', 1.0),
-                        wait_weight    = BELIEF_WAIT_WEIGHT,
+                        wait_weight    = getattr(self.cfg, 'wait_weight', BELIEF_WAIT_WEIGHT),
                         belief_pos_weight = getattr(self.cfg, 'belief_pos_weight', 2.4),
                     )
                     total = total + bw_loss
