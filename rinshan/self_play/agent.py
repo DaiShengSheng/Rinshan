@@ -12,6 +12,8 @@ RandomAgent
 """
 from __future__ import annotations
 
+import json
+import os
 import random
 from abc import ABC, abstractmethod
 from typing import Optional
@@ -268,6 +270,7 @@ class RinshanAgent(BaseAgent):
         top_p: float = 0.9,
         greedy: bool = False,
         infer_dtype: str = "auto",
+        enable_rule_based_agari_guard: bool = False,
         # infer_dtype 控制推理时的 autocast 精度：
         #   "auto"    → cuda 设备自动选 bf16（与训练一致，动态范围安全），cpu 不开 autocast
         #   "bf16"    → 强制 bfloat16（推荐，与训练 dtype 一致）
@@ -281,6 +284,7 @@ class RinshanAgent(BaseAgent):
         self.top_p = top_p
         self.greedy = greedy
         self.infer_dtype = infer_dtype
+        self.enable_rule_based_agari_guard = enable_rule_based_agari_guard
         # 仅在显式打开时启用 quick-eval；默认关闭，避免行为漂移。
         self.enable_quick_eval = False
 
@@ -291,6 +295,10 @@ class RinshanAgent(BaseAgent):
         self._sim      = MjaiSimulator()
         # seat -> {"state": GameState, "n_events": int}
         self._state_cache: dict[int, dict[str, object]] = {}
+        # (game_key稳定前缀, seat) -> True: 刚发出过 reach，下一次 turn_action 必须弃牌
+        # 注意：Rust arena 的 _game_key 格式为 "rust:gN:iK"，其中 iK 在 reach 前后可能变化。
+        # 因此只取 ":i" 之前的稳定前缀作为 key，避免 reach 发出后 iK 变化导致 miss。
+        self._pending_riichi_discard: set[tuple] = set()
 
     def on_game_start(self) -> None:
         # 注意：同一个 RinshanAgent 实例可能被 Arena 复用于多场并行对局，
@@ -309,6 +317,10 @@ class RinshanAgent(BaseAgent):
                            if isinstance(k, tuple) and k[0].startswith(prefix)]
             for k in keys_to_del:
                 del self._state_cache[k]
+            riichi_keys = [k for k in self._pending_riichi_discard
+                           if isinstance(k, tuple) and k[0].startswith(prefix)]
+            for k in riichi_keys:
+                self._pending_riichi_discard.discard(k)
 
     def _make_autocast_ctx(self):
         """
@@ -340,7 +352,11 @@ class RinshanAgent(BaseAgent):
 
     def _get_cached_state(self, seat: int, player_events: list[dict], pending: dict):
         game_key = str(pending.get("_game_key", "default"))
-        cache_key = (game_key, seat)
+        # Rust arena 的 _game_key 含 ":iK" 后缀，同一局不同 iteration key 不同。
+        # 必须截取稳定前缀，否则同局会建多份独立缓存导致状态错乱。
+        _ri = game_key.find(":i")
+        stable_key = game_key[:_ri] if _ri != -1 else game_key
+        cache_key = (stable_key, seat)
         cached = self._state_cache.get(cache_key)
 
         if cached is None:
@@ -399,9 +415,64 @@ class RinshanAgent(BaseAgent):
 
         for i, (seat, player_events, pending) in enumerate(requests):
             ptype = pending.get("type")
+            game_key = str(pending.get("_game_key", "default"))
+            # Rust arena 的 _game_key 格式为 "rust:gN:iK"，iK 在 reach 前后可能变化。
+            # 截取 ":i" 之前的稳定前缀作为 riichi_key，避免 miss。
+            _ri = game_key.find(":i")
+            stable_gk = game_key[:_ri] if _ri != -1 else game_key
+            riichi_key = (stable_gk, seat)
+            if self.enable_rule_based_agari_guard:
+                pending["_rule_based_agari_guard"] = True
             state = self._get_cached_state(seat, player_events, pending)
 
             if ptype == "turn_action":
+                # ── 立直宣言后强制弃牌：Rust 发的 post-reach turn_action ──────
+                # Rust 在收到 reach 后，会立即再发一次 turn_action 要弃牌。
+                # 此时 pending 的 can_riichi 仍可能为 True，但我们已记录了刚发过 reach。
+                # 必须强制排除 RIICHI_TOKEN，只允许弃牌，否则会无限循环宣言。
+                if riichi_key in self._pending_riichi_discard:
+                    self._pending_riichi_discard.discard(riichi_key)
+                    # 强制进入纯弃牌模式：移除 riichi / tsumo，只保留 discard
+                    candidates, can_tsumo, _ = _build_turn_candidates(state, seat, sim=self._sim)
+                    if "valid_discards" in pending:
+                        from rinshan.constants import DISCARD_OFFSET as _DO
+                        from rinshan.tile import Tile as _Tile
+                        _rd = set()
+                        for _pai in pending["valid_discards"]:
+                            _t = _Tile.from_mjai(_pai)
+                            if _t.is_aka:
+                                _rd.add(_DO + {4:34,13:35,22:36}[_t.tile_id])
+                            else:
+                                _rd.add(_DO + _t.tile_id)
+                        candidates = sorted(_rd)
+                    else:
+                        candidates = [t for t in candidates
+                                      if DISCARD_OFFSET <= t < DISCARD_OFFSET + 37]
+                    candidates = [t for t in candidates if t != RIICHI_TOKEN and t != TSUMO_AGARI_TOKEN]
+                    if not candidates:
+                        # fallback: 用 valid_discards 第一张
+                        vd = pending.get("valid_discards")
+                        if vd:
+                            from rinshan.tile import Tile as _T2
+                            _t2 = _T2.from_mjai(vd[0])
+                            responses[i] = {"type": "dahai", "actor": seat,
+                                            "pai": _t2.to_mjai(), "tsumogiri": False}
+                            continue
+                        responses[i] = {"type": "pass", "actor": seat}
+                        continue
+                    can_tsumo = False
+                    # 直接走模型弃牌，跳过下面所有的 reconcile 逻辑
+                    state2 = state
+                    ann2 = _state_to_annotation(state2, seat, player_events, candidates)
+                    batch_indices.append(i)
+                    batch_encoded.append(self._encoder.encode(ann2))
+                    batch_states.append(state2)
+                    batch_candidates.append(candidates)
+                    batch_pending.append(pending)
+                    batch_seats.append(seat)
+                    batch_can_tsumo.append(False)
+                    self._quick_stats["model"] += 1
+                    continue
                 candidates, can_tsumo, _ = _build_turn_candidates(state, seat, sim=self._sim)
 
                 # Rust valid_discards: authoritative discard set from Rust tehai.
@@ -435,7 +506,12 @@ class RinshanAgent(BaseAgent):
                 if "can_riichi" in pending:
                     if pending.get("can_riichi", False):
                         if RIICHI_TOKEN not in candidates:
-                            candidates = [RIICHI_TOKEN] + candidates
+                            insert_at = 0
+                            while insert_at < len(candidates) and (
+                                DISCARD_OFFSET <= candidates[insert_at] < DISCARD_OFFSET + 37
+                            ):
+                                insert_at += 1
+                            candidates = candidates[:insert_at] + [RIICHI_TOKEN] + candidates[insert_at:]
                     else:
                         candidates = [t for t in candidates if t != RIICHI_TOKEN]
                 if "can_ryukyoku" in pending:
@@ -506,6 +582,20 @@ class RinshanAgent(BaseAgent):
             )
             if quick is not None:
                 responses[i] = quick
+                if quick.get("type") == "reach":
+                    self._pending_riichi_discard.add((stable_gk, seat))
+                dbg_path = os.environ.get("RINSHAN_ACTION_TRACE")
+                # pass 动作不记录，避免大量 IO
+                if dbg_path and quick.get("type") != "pass":
+                    with open(dbg_path, "a", encoding="utf-8") as f:
+                        f.write(json.dumps({
+                            "phase": "quick",
+                            "seat": seat,
+                            "pending_type": ptype,
+                            "pending": pending,
+                            "response": quick,
+                            "candidates": candidates,
+                        }, ensure_ascii=False) + "\n")
                 self._quick_stats["forced"] += 1
                 continue
 
@@ -555,6 +645,24 @@ class RinshanAgent(BaseAgent):
                     q_values=q_cpu,
                     candidates=candidates,
                 )
+                # 如果模型选了 reach，记录该座位需要一次强制弃牌
+                if responses[orig_i].get("type") == "reach":
+                    _gk = str(batch_pending[local_i].get("_game_key", "default"))
+                    _ri2 = _gk.find(":i")
+                    _stable_gk = _gk[:_ri2] if _ri2 != -1 else _gk
+                    self._pending_riichi_discard.add((_stable_gk, batch_seats[local_i]))
+                dbg_path = os.environ.get("RINSHAN_ACTION_TRACE")
+                if dbg_path and responses[orig_i].get("type") in {"reach", "hora", "chi", "pon", "daiminkan", "ankan", "kakan", "dahai", "pass"}:
+                    with open(dbg_path, "a", encoding="utf-8") as f:
+                        f.write(json.dumps({
+                            "phase": "model",
+                            "seat": batch_seats[local_i],
+                            "pending_type": batch_pending[local_i].get("type"),
+                            "pending": batch_pending[local_i],
+                            "response": responses[orig_i],
+                            "chosen_token": chosen_token,
+                            "candidates": candidates,
+                        }, ensure_ascii=False) + "\n")
 
         return [r if r is not None else {"type": "pass", "actor": requests[i][0]} for i, r in enumerate(responses)]
 
@@ -1049,6 +1157,104 @@ def _state_to_annotation(state, seat: int, events: list[dict],
     )
 
 
+def _is_hora_valid_by_rules(token: int, seat: int, state, pending: dict) -> bool:
+    """对 hora 动作做一次保守规则校验，避免 Rust 侧因非法和牌 panic。"""
+    from rinshan.constants import TSUMO_AGARI_TOKEN, RON_AGARI_TOKEN
+    from rinshan.engine.hora_calc import has_yaku
+
+    if state is None:
+        return True
+    if token not in (TSUMO_AGARI_TOKEN, RON_AGARI_TOKEN):
+        return True
+
+    is_tsumo = token == TSUMO_AGARI_TOKEN
+    try:
+        if is_tsumo:
+            win_tile = state.last_draw
+            if win_tile is None:
+                return False
+            hand = list(state.hands[seat])
+            removed = False
+            for idx in range(len(hand) - 1, -1, -1):
+                t = hand[idx]
+                if t.tile_id == win_tile.tile_id and t.is_aka == win_tile.is_aka:
+                    hand.pop(idx)
+                    removed = True
+                    break
+            if not removed:
+                for idx in range(len(hand) - 1, -1, -1):
+                    t = hand[idx]
+                    if t.tile_id == win_tile.tile_id:
+                        hand.pop(idx)
+                        removed = True
+                        break
+            if not removed:
+                return False
+        else:
+            if hasattr(state, "is_furiten") and state.is_furiten(seat):
+                return False
+            pai = pending.get("tile")
+            if not pai:
+                return False
+            win_tile = Tile.from_mjai(pai)
+            hand = list(state.hands[seat])
+
+        return has_yaku(
+            hand=hand,
+            win_tile=win_tile,
+            melds=list(state.melds[seat]),
+            is_tsumo=is_tsumo,
+            is_riichi=bool(state.in_riichi[seat] or state.riichi_accepted[seat] or state.riichi_declared[seat]),
+            player_wind=(seat - state.dealer) % 4,
+            round_wind=state.round_wind,
+        )
+    except Exception:
+        return True
+
+
+
+def _fallback_non_hora_response(
+    seat: int,
+    state,
+    pending: dict,
+    can_tsumo: bool,
+    q_values: "Optional[torch.Tensor]" = None,
+    candidates: "Optional[list[int]]" = None,
+) -> dict:
+    """当 hora 校验失败时，回退到分数最高的非 hora 合法动作。"""
+    from rinshan.constants import TSUMO_AGARI_TOKEN, RON_AGARI_TOKEN
+
+    if not candidates:
+        return {"type": "pass", "actor": seat}
+
+    fallback_token = None
+    best_q = float("-inf")
+    for i, tok in enumerate(candidates):
+        if tok in (TSUMO_AGARI_TOKEN, RON_AGARI_TOKEN):
+            continue
+        if fallback_token is None:
+            fallback_token = tok
+        if q_values is not None and i < q_values.shape[0]:
+            qv = float(q_values[i].item())
+            if qv > best_q:
+                best_q = qv
+                fallback_token = tok
+
+    if fallback_token is None:
+        return {"type": "pass", "actor": seat}
+
+    return _token_to_mjai(
+        fallback_token,
+        seat,
+        state,
+        pending,
+        can_tsumo,
+        q_values=None,
+        candidates=None,
+    )
+
+
+
 def _token_to_mjai(token: int, seat: int, state, pending: dict,
                    can_tsumo: bool,
                    q_values: "Optional[torch.Tensor]" = None,
@@ -1063,6 +1269,8 @@ def _token_to_mjai(token: int, seat: int, state, pending: dict,
 
     # 荣和
     if token == RON_AGARI_TOKEN:
+        if pending.get("_rule_based_agari_guard", False) and not _is_hora_valid_by_rules(token, seat, state, pending):
+            return _fallback_non_hora_response(seat, state, pending, can_tsumo, q_values=q_values, candidates=candidates)
         # Rust Hora 只需要 actor + target，不接受 pai 字段
         return {
             "type": "hora", "actor": seat,
@@ -1070,6 +1278,8 @@ def _token_to_mjai(token: int, seat: int, state, pending: dict,
         }
     # 自摸和
     if token == TSUMO_AGARI_TOKEN:
+        if pending.get("_rule_based_agari_guard", False) and not _is_hora_valid_by_rules(token, seat, state, pending):
+            return _fallback_non_hora_response(seat, state, pending, can_tsumo, q_values=q_values, candidates=candidates)
         # libriichi 的自摸和同样使用 Hora(actor==target) 表示。
         return {"type": "hora", "actor": seat, "target": seat}
     # Pass / 立直中摸切
@@ -1105,7 +1315,6 @@ def _token_to_mjai(token: int, seat: int, state, pending: dict,
         # 否则，退回到 Python 追踪的手牌做校验，漂移时 fallback 到摸切。
         rust_discards = pending.get("valid_discards") if pending is not None else None
         if rust_discards is not None:
-            # token 已受 Rust 权威集约束，直接信任
             tile_in_hand = True
         else:
             hand = state.hands[seat] if state is not None else []
@@ -1116,25 +1325,19 @@ def _token_to_mjai(token: int, seat: int, state, pending: dict,
         if not tile_in_hand and state is not None:
             last = state.last_draw
             if last is not None:
-                return {
-                    "type": "dahai", "actor": seat,
-                    "pai": last.to_mjai(), "tsumogiri": True,
-                }
-            # last_draw 也不存在（理论上不该发生）——打手牌第一张兜底
+                return {"type": "dahai", "actor": seat,
+                        "pai": last.to_mjai(), "tsumogiri": True}
             _hand = state.hands[seat] if state is not None else []
             if _hand:
-                return {
-                    "type": "dahai", "actor": seat,
-                    "pai": _hand[0].to_mjai(), "tsumogiri": False,
-                }
+                return {"type": "dahai", "actor": seat,
+                        "pai": _hand[0].to_mjai(), "tsumogiri": False}
         last = state.last_draw if state is not None else None
         tsumogiri = (last is not None and
                      last.tile_id == tile.tile_id and
                      last.is_aka == tile.is_aka)
-        return {
-            "type": "dahai", "actor": seat,
-            "pai": tile.to_mjai(), "tsumogiri": tsumogiri,
-        }
+        return {"type": "dahai", "actor": seat,
+                "pai": tile.to_mjai(), "tsumogiri": tsumogiri}
+
     # 吃
     if CHI_OFFSET <= token < CHI_OFFSET + 90:
         chi_idx = token - CHI_OFFSET
@@ -1186,12 +1389,12 @@ def _token_to_mjai(token: int, seat: int, state, pending: dict,
     if KAKAN_OFFSET <= token < KAKAN_OFFSET + NUM_TILE_TYPES:
         tile_id = token - KAKAN_OFFSET
         tile = next((t for t in state.hands[seat] if t.tile_id == tile_id), Tile(tile_id))
-        # Rust Kakan 需要 consumed:[Tile;3]（原先的碰子）
-        consumed = _find_daiminkan_consumed(state.hands[seat], tile_id)
+        # Rust libriichi 的 kakan 反应只需要 pai；
+        # 若把原碰子的 3 张 consumed 一并传过去，Rust 可能在已有 pon 上重复 push，
+        # 触发 ArrayVec capacity overflow。
         return {
             "type": "kakan", "actor": seat,
             "pai": tile.to_mjai(),
-            "consumed": [t.to_mjai() for t in consumed],
         }
 
     # 九种九牌流局

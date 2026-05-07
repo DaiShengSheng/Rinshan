@@ -136,18 +136,26 @@ def load_model(ckpt_path: str, preset: str, device: str):
     # torch.compile 保存的 state_dict key 带 "_orig_mod." 前缀，strip 掉
     if any(k.startswith("_orig_mod.") for k in state):
         state = {k.removeprefix("_orig_mod."): v for k, v in state.items()}
-    model.load_state_dict(state, strict=False)
+    missing, unexpected = model.load_state_dict(state, strict=False)
     model.to(device)
     model.eval()
     print(f"[+] 模型已加载：{ckpt_path} (preset={preset})")
     param_count = sum(p.numel() for p in model.parameters()) / 1e6
     print(f"    参数量：{param_count:.1f}M")
+    print(f"    load_state_dict: missing={len(missing)} unexpected={len(unexpected)}")
+    if missing:
+        print("    missing_keys(sample):", list(missing)[:12])
+    if unexpected:
+        print("    unexpected_keys(sample):", list(unexpected)[:12])
+    if len(missing) > 0 or len(unexpected) > 0:
+        print("[!] 警告：checkpoint 与当前模型结构/预设不完全匹配，可能存在未正确加载的权重")
     return model
 
 
 def build_agents(args):
     """根据参数构建 agent 列表"""
     from rinshan.self_play.agent import RandomAgent, RinshanAgent
+    from rinshan.self_play.libriichi_agent import LibriichiBoostedAgent, libriichi_available
 
     if args.mode == "random":
         agents = [RandomAgent(name=f"random_{i}", seed=args.seed+i)
@@ -164,14 +172,16 @@ def build_agents(args):
     model = load_model(args.ckpt, args.model_preset, args.device)
     n = max(1, min(args.n_agents, 4))
     agents = []
+    AgentCls = LibriichiBoostedAgent if libriichi_available() else RinshanAgent
     for i in range(n):
-        agents.append(RinshanAgent(
+        agents.append(AgentCls(
             model       = model,
             name        = f"rinshan_{i}",
             device      = args.device,
             temperature = args.temperature,
             top_p       = args.top_p,
             greedy      = args.greedy,
+            enable_rule_based_agari_guard = True,
         ))
     return agents
 
@@ -183,6 +193,7 @@ def build_versus_agents(args):
     每局始终保持 2 ch + 2 bl，且座位均匀分布。
     """
     from rinshan.self_play.agent import RinshanAgent
+    from rinshan.self_play.libriichi_agent import LibriichiBoostedAgent, libriichi_available
 
     if not args.ckpt:
         raise ValueError("versus 模式必须指定 --ckpt")
@@ -212,10 +223,13 @@ def build_versus_agents(args):
     # round_robin 下 game_idx=0 → seats=(ch, bl, ch, bl)
     #              game_idx=1 → seats=(bl, ch, bl, ch)  依次轮换
     # 每局恰好 2 ch + 2 bl，座次均匀覆盖。
-    agent_ch = RinshanAgent(model_ch, name="ch", device=args.device,
-                            temperature=args.temperature, top_p=args.top_p, greedy=args.greedy)
-    agent_bl = RinshanAgent(model_bl, name="bl", device=args.device,
-                            temperature=args.temperature, top_p=args.top_p, greedy=args.greedy)
+    AgentCls = LibriichiBoostedAgent if libriichi_available() else RinshanAgent
+    agent_ch = AgentCls(model_ch, name="ch", device=args.device,
+                        temperature=args.temperature, top_p=args.top_p, greedy=args.greedy,
+                        enable_rule_based_agari_guard=True)
+    agent_bl = AgentCls(model_bl, name="bl", device=args.device,
+                        temperature=args.temperature, top_p=args.top_p, greedy=args.greedy,
+                        enable_rule_based_agari_guard=True)
     agents = [agent_ch, agent_bl, agent_ch, agent_bl]
     return agents
 
@@ -576,6 +590,7 @@ def evaluate_versus_strength(args, log_dir_override=None) -> dict:
     """返回对战汇总指标，供 Stage3 arena gate 使用。"""
     import time
     from rinshan.self_play.agent import RinshanAgent
+    from rinshan.self_play.libriichi_agent import LibriichiBoostedAgent, libriichi_available
     from libriichi.arena import TwoVsTwo
 
     n_games = int(args.n_games)
@@ -588,10 +603,13 @@ def evaluate_versus_strength(args, log_dir_override=None) -> dict:
     preset2 = args.ckpt2_preset or args.model_preset
     model_ch = load_model(args.ckpt, args.model_preset, args.device)
     model_bl = load_model(args.ckpt2, preset2, args.device)
-    agent_ch = RinshanAgent(model_ch, name="ch", device=args.device,
-                            temperature=args.temperature, top_p=args.top_p, greedy=args.greedy)
-    agent_bl = RinshanAgent(model_bl, name="bl", device=args.device,
-                            temperature=args.temperature, top_p=args.top_p, greedy=args.greedy)
+    AgentCls = LibriichiBoostedAgent if libriichi_available() else RinshanAgent
+    agent_ch = AgentCls(model_ch, name="ch", device=args.device,
+                        temperature=args.temperature, top_p=args.top_p, greedy=args.greedy,
+                        enable_rule_based_agari_guard=True)
+    agent_bl = AgentCls(model_bl, name="bl", device=args.device,
+                        temperature=args.temperature, top_p=args.top_p, greedy=args.greedy,
+                        enable_rule_based_agari_guard=True)
 
     effective_log_dir = log_dir_override if log_dir_override is not None else args.log_dir
     arena = TwoVsTwo(disable_progress_bar=args.quiet, log_dir=effective_log_dir)
@@ -599,7 +617,8 @@ def evaluate_versus_strength(args, log_dir_override=None) -> dict:
     generated = 0
     skipped = 0
     t0 = time.time()
-    _LIBRIICHI_HAND_ERRS = ("is not in hand", "cannot tsumogiri", "not a hora hand")
+    _LIBRIICHI_HAND_ERRS = ("is not in hand", "cannot tsumogiri", "not a hora hand",
+                             "capacity overflow")
     while generated < n_games:
         this_wave = min(wave, n_games - generated)
         try:
@@ -607,12 +626,13 @@ def evaluate_versus_strength(args, log_dir_override=None) -> dict:
             all_results.extend(results)
             generated += this_wave
         except RuntimeError as e:
-            if any(tag in str(e) for tag in _LIBRIICHI_HAND_ERRS):
+            emsg = str(e)
+            if any(tag in emsg for tag in _LIBRIICHI_HAND_ERRS):
                 skipped += 1
                 generated += 1
                 if not args.quiet:
-                    print(f"\n[warn] libriichi hand-state bug @ seed={args.seed + generated - 1}"
-                          f"，已跳过（共跳过 {skipped} 局）", flush=True)
+                    print(f"\n[warn] libriichi bug @ seed={args.seed + generated - 1}"
+                          f" msg={emsg!r}，已跳过（共跳过 {skipped} 局）", flush=True)
             else:
                 raise
 
@@ -706,11 +726,14 @@ def run_rust_selfplay(args) -> None:
     """Rust SelfPlay 单模型自对弈（wave 循环，支持 --parallel_games）"""
     import time, tempfile, shutil
     from rinshan.self_play.agent import RinshanAgent
+    from rinshan.self_play.libriichi_agent import LibriichiBoostedAgent, libriichi_available
     from libriichi.arena import SelfPlay
 
     model = load_model(args.ckpt, args.model_preset, args.device)
-    agent = RinshanAgent(model, name="selfplay", device=args.device,
-                         temperature=args.temperature, top_p=args.top_p, greedy=args.greedy)
+    AgentCls = LibriichiBoostedAgent if libriichi_available() else RinshanAgent
+    agent = AgentCls(model, name="selfplay", device=args.device,
+                     temperature=args.temperature, top_p=args.top_p, greedy=args.greedy,
+                     enable_rule_based_agari_guard=True)
 
     # mjson 模式：用临时目录接收 log_dir 输出
     _tmp_log_dir = None
@@ -730,7 +753,8 @@ def run_rust_selfplay(args) -> None:
     # 原因是 libriichi 下发给 Python 的 start_kyoku.tehais 与
     # Rust 内部实际手牌存在间歇性不一致。
     # workaround：跳过触发该 bug 的 seed（通常 <1%），继续生成后续局。
-    _LIBRIICHI_HAND_ERRS = ("is not in hand", "cannot tsumogiri", "not a hora hand")
+    _LIBRIICHI_HAND_ERRS = ("is not in hand", "cannot tsumogiri", "not a hora hand",
+                              "capacity overflow")
 
     while generated < args.n_games:
         this_wave = min(args.parallel_games, args.n_games - generated)

@@ -34,7 +34,10 @@ Rinshan 的自对弈 Agent (RinshanAgent) 内部用纯 Python 的 _replay_events
 from __future__ import annotations
 
 import json
+import os
 from typing import Optional
+
+import torch
 
 try:
     from libriichi.state import PlayerState as LRPlayerState
@@ -57,9 +60,68 @@ from rinshan.constants import (
 from rinshan.tile import Tile
 
 
+_VALID_DISCARD_TOKEN_MAP = {
+    **{f"{n}m": DISCARD_OFFSET + (n - 1) for n in range(1, 10)},
+    **{f"{n}p": DISCARD_OFFSET + (9 + n - 1) for n in range(1, 10)},
+    **{f"{n}s": DISCARD_OFFSET + (18 + n - 1) for n in range(1, 10)},
+    **{f"{n}z": DISCARD_OFFSET + (27 + n - 1) for n in range(1, 8)},
+    "0m": DISCARD_OFFSET + 34,
+    "0p": DISCARD_OFFSET + 35,
+    "0s": DISCARD_OFFSET + 36,
+}
+
+
+def _replace_discard_candidates_with_valid_discards(candidates: list[int], pending: dict) -> list[int]:
+    """
+    用 Rust `valid_discards` 作为弃牌候选的权威来源。
+
+    libriichi 的 PlayerState 通常很准，但一旦 Python/Rust 事件流出现轻微漂移，
+    仅靠 `last_cans` 推出来的 discard token 仍可能和 Rust 当前真实手牌不一致，
+    进而在 Rust 侧触发：
+      "dahai XXX not in Rust hand, falling back to tsumogiri"
+
+    为消除此类漂移：
+    - 只要 pending 提供了 `valid_discards`，就无条件用它覆盖全部 discard 候选；
+    - non-discard 候选（riichi/tsumo/ankan/...）保持原顺序；
+    - discard 部分仍按 token 升序，尽量保持与训练时一致。
+    """
+    valid_discards = pending.get("valid_discards")
+    if not valid_discards:
+        return candidates
+
+    rust_discards: list[int] = []
+    seen_discards: set[int] = set()
+    for pai in valid_discards:
+        token = _VALID_DISCARD_TOKEN_MAP.get(pai)
+        if token is not None and token not in seen_discards:
+            seen_discards.add(token)
+            rust_discards.append(token)
+
+    if not rust_discards:
+        return candidates
+
+    rust_discards.sort()
+    non_discards = [
+        token for token in candidates
+        if not (DISCARD_OFFSET <= token < DISCARD_OFFSET + 37)
+    ]
+    return rust_discards + non_discards
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # PlayerState 包装器
 # ─────────────────────────────────────────────────────────────────────────────
+
+# libriichi start_kyoku 要求 bakaze/jikaze 使用 "E"/"S"/"W"/"N"，
+# 而 Rinshan 内部用 mjai 牌记法 "1z"~"4z"，需在喂入前转换。
+_WIND_TILE_TO_STR: dict[str, str] = {"1z": "E", "2z": "S", "3z": "W", "4z": "N"}
+
+# 喂给 libriichi 时需过滤掉的 Rinshan 私有字段
+_LR_PRIV_KEYS: frozenset[str] = frozenset({
+    "_game_key", "_rule_based_agari_guard",
+    "_shanten", "_waits", "_tehai", "_candidates",
+})
+
 
 class _LRStateTracker:
     """
@@ -88,12 +150,34 @@ class _LRStateTracker:
         """增量喂入新事件（比 n_events 之后的部分）"""
         if self._ps is None:
             return
-        for ev in events[self._n_events:]:
+        new_events = events[self._n_events:]
+        if not new_events:
+            return
+        dbg_path = os.environ.get("RINSHAN_ACTION_TRACE")  # 循环外取一次
+        for ev in new_events:
+            # 过滤私有字段（用模块级常量，避免每次构建）
+            ev_clean = {k: v for k, v in ev.items() if k not in _LR_PRIV_KEYS}
+            # start_kyoku: bakaze/jikaze 从 mjai 牌记法转为风向字符串
+            if ev_clean.get("type") == "start_kyoku":
+                bk = _WIND_TILE_TO_STR.get(ev_clean.get("bakaze"))
+                jk = _WIND_TILE_TO_STR.get(ev_clean.get("jikaze"))
+                if bk or jk:
+                    ev_clean = dict(ev_clean)  # 只在需要时才拷贝
+                    if bk:
+                        ev_clean["bakaze"] = bk
+                    if jk:
+                        ev_clean["jikaze"] = jk
             try:
-                self._ps.update(json.dumps(ev))
-            except Exception:
-                # libriichi 对某些非标准事件会报错，忽略即可
-                pass
+                self._ps.update(json.dumps(ev_clean))
+            except Exception as exc:
+                if dbg_path:
+                    with open(dbg_path, "a", encoding="utf-8") as _f:
+                        _f.write(json.dumps({
+                            "phase": "lr_feed_error",
+                            "seat": self.seat,
+                            "event": ev_clean,
+                            "error": str(exc),
+                        }, ensure_ascii=False) + "\n")
         self._n_events = len(events)
 
     def feed_full(self, events: list[dict]) -> None:
@@ -267,8 +351,15 @@ class LibriichiBoostedAgent(RinshanAgent):
 
     def _get_lr_tracker(self, seat: int, game_key: str,
                         player_events: list[dict]) -> _LRStateTracker:
-        """按 (game_key, seat) 获取或创建 tracker，增量更新事件。"""
-        cache_key = (game_key, seat)
+        """按 (stable_game_key, seat) 获取或创建 tracker，增量更新事件。
+
+        Rust arena 的 _game_key 格式为 "rust:gN:iK"，其中 iK 在同一局内
+        可能随 iteration 变化（例如 reach 前后从 i0 变为 i2）。
+        只取 ":i" 之前的稳定前缀，保证同一局所有 pending 共享同一 tracker。
+        """
+        _ri = game_key.find(":i")
+        stable_key = game_key[:_ri] if _ri != -1 else game_key
+        cache_key = (stable_key, seat)
         tracker = self._lr_trackers.get(cache_key)
         if tracker is None:
             tracker = _LRStateTracker(seat)
@@ -298,7 +389,7 @@ class LibriichiBoostedAgent(RinshanAgent):
             return super().react_batch_requests(requests)
 
         from rinshan.data.dataset import collate_fn
-        from rinshan.self_play.agent import _state_to_annotation, _token_to_mjai
+        from rinshan.self_play.agent import _state_to_annotation, _token_to_mjai, _single_forced_response
 
         responses: list[dict | None] = [None] * len(requests)
         batch_indices:    list[int]       = []
@@ -310,6 +401,9 @@ class LibriichiBoostedAgent(RinshanAgent):
 
         for i, (seat, player_events, pending) in enumerate(requests):
             game_key = str(pending.get("_game_key", "default"))
+            _ri = game_key.find(":i")
+            stable_gk = game_key[:_ri] if _ri != -1 else game_key
+            riichi_key = (stable_gk, seat)
 
             # ── 候选生成（Rust）──────────────────────────────
             tracker = self._get_lr_tracker(seat, game_key, player_events)
@@ -320,6 +414,45 @@ class LibriichiBoostedAgent(RinshanAgent):
             # libriichi 的 PlayerState.last_cans 已经很准，但这里仍用 pending
             # 做最后 reconcile，避免 Python 侧误产生 Rust 不接受的动作。
             if ptype == "turn_action":
+                # ── 立直宣言后强制弃牌 ───────────────────────────────────
+                # Rust 在收到 reach 后会再发一次 turn_action 要弃牌。
+                # pending 的 can_riichi 此时可能仍为 True，所以用内部状态追踪。
+                if riichi_key in self._pending_riichi_discard:
+                    self._pending_riichi_discard.discard(riichi_key)
+                    vd = pending.get("valid_discards")
+                    if vd:
+                        disc_cands: list[int] = []
+                        seen_d: set[int] = set()
+                        for _pai in vd:
+                            tok = _VALID_DISCARD_TOKEN_MAP.get(_pai)
+                            if tok is not None and tok not in seen_d:
+                                seen_d.add(tok)
+                                disc_cands.append(tok)
+                        disc_cands.sort()
+                        candidates = disc_cands
+                    else:
+                        candidates = [t for t in candidates
+                                      if DISCARD_OFFSET <= t < DISCARD_OFFSET + 37]
+                    if not candidates:
+                        vd2 = pending.get("valid_discards")
+                        if vd2:
+                            responses[i] = {"type": "dahai", "actor": seat,
+                                            "pai": vd2[0], "tsumogiri": False}
+                        else:
+                            responses[i] = {"type": "pass", "actor": seat}
+                        continue
+                    state = self._get_cached_state(seat, player_events, pending)
+                    ann = _state_to_annotation(state, seat, player_events, candidates)
+                    batch_indices.append(i)
+                    batch_encoded.append(self._encoder.encode(ann))
+                    batch_candidates.append(candidates)
+                    batch_pending.append(pending)
+                    batch_seats.append(seat)
+                    batch_states.append(state)
+                    continue
+
+                candidates = _replace_discard_candidates_with_valid_discards(candidates, pending)
+
                 if "can_tsumo" in pending:
                     if pending.get("can_tsumo", False):
                         if TSUMO_AGARI_TOKEN not in candidates:
@@ -329,7 +462,12 @@ class LibriichiBoostedAgent(RinshanAgent):
                 if "can_riichi" in pending:
                     if pending.get("can_riichi", False):
                         if RIICHI_TOKEN not in candidates:
-                            candidates = [RIICHI_TOKEN] + candidates
+                            insert_at = 0
+                            while insert_at < len(candidates) and (
+                                DISCARD_OFFSET <= candidates[insert_at] < DISCARD_OFFSET + 37
+                            ):
+                                insert_at += 1
+                            candidates = candidates[:insert_at] + [RIICHI_TOKEN] + candidates[insert_at:]
                     else:
                         candidates = [t for t in candidates if t != RIICHI_TOKEN]
                 from rinshan.constants import RYUKYOKU_TOKEN
@@ -350,12 +488,41 @@ class LibriichiBoostedAgent(RinshanAgent):
                         if not (KAKAN_OFFSET <= t < KAKAN_OFFSET + NUM_TILE_TYPES)
                     ]
 
+            if self.enable_rule_based_agari_guard:
+                pending["_rule_based_agari_guard"] = True
+
+            # ── 编码仍需 Python GameState（token 序列） ──────
+            state = self._get_cached_state(seat, player_events, pending)
+
+            quick = _single_forced_response(
+                seat,
+                pending,
+                candidates,
+                state,
+                force_one_candidate_only=bool(getattr(self, "enable_quick_eval", False)),
+            )
+            if quick is not None:
+                responses[i] = quick
+                # quick path 如果发出了 reach，同样需要记录强制弃牌
+                if quick.get("type") == "reach":
+                    self._pending_riichi_discard.add((stable_gk, seat))
+                dbg_path = os.environ.get("RINSHAN_ACTION_TRACE")
+                if dbg_path and quick.get("type") != "pass":
+                    with open(dbg_path, "a", encoding="utf-8") as f:
+                        f.write(json.dumps({
+                            "phase": "quick",
+                            "seat": seat,
+                            "pending_type": ptype,
+                            "pending": pending,
+                            "response": quick,
+                            "candidates": candidates,
+                        }, ensure_ascii=False) + "\n")
+                continue
+
             if not candidates:
                 responses[i] = {"type": "pass", "actor": seat}
                 continue
 
-            # ── 编码仍需 Python GameState（token 序列） ──────
-            state = self._get_cached_state(seat, player_events, pending)
             ann = _state_to_annotation(state, seat, player_events, candidates)
 
             batch_indices.append(i)
@@ -397,6 +564,24 @@ class LibriichiBoostedAgent(RinshanAgent):
                     q_values=q_values[local_i],
                     candidates=candidates,
                 )
+                # 如果模型选了 reach，记录该座位需要一次强制弃牌
+                if responses[orig_i].get("type") == "reach":
+                    _gk = str(batch_pending[local_i].get("_game_key", "default"))
+                    _ri2 = _gk.find(":i")
+                    _stable_gk = _gk[:_ri2] if _ri2 != -1 else _gk
+                    self._pending_riichi_discard.add((_stable_gk, batch_seats[local_i]))
+                dbg_path = os.environ.get("RINSHAN_ACTION_TRACE")
+                if dbg_path and responses[orig_i].get("type") in {"reach", "hora", "chi", "pon", "daiminkan", "ankan", "kakan", "dahai", "pass"}:
+                    with open(dbg_path, "a", encoding="utf-8") as f:
+                        f.write(json.dumps({
+                            "phase": "model",
+                            "seat": batch_seats[local_i],
+                            "pending_type": batch_pending[local_i].get("type"),
+                            "pending": batch_pending[local_i],
+                            "response": responses[orig_i],
+                            "chosen_token": chosen_token,
+                            "candidates": candidates,
+                        }, ensure_ascii=False) + "\n")
 
         return [
             r if r is not None else {"type": "pass", "actor": requests[i][0]}

@@ -177,11 +177,18 @@ class MjaiDataset(IterableDataset):
 
                     # GRP 2.0：game reward 只在跨局/终局时结算；
                     # hand reward 保留为逐局局内 shaping（当前由 round_delta_score 代理）。
+                    #
+                    # 注意：total reward 必须始终与分支 reward 保持一致：
+                    #   reward == reward_game + reward_hand
+                    # 否则会出现 total Q 学“局内 reward=0”，而 hand 分支同时学
+                    # “局内 reward!=0” 的目标冲突，导致 Stage3 早期策略快速漂移。
                     if grp_state_key == prev_grp_state_key:
-                        prev_encoded["reward"] = torch.zeros_like(prev_encoded["reward"])
                         prev_encoded["reward_game"] = torch.zeros_like(prev_encoded["reward_game"])
-                    else:
-                        prev_encoded["reward"] = prev_encoded["reward_game"] + prev_encoded["reward_hand"]
+                    prev_encoded["reward"] = prev_encoded["reward_game"] + prev_encoded["reward_hand"]
+                    assert torch.allclose(
+                        prev_encoded["reward"],
+                        prev_encoded["reward_game"] + prev_encoded["reward_hand"],
+                    )
                     yield prev_encoded
 
                 prev_by_key[key] = (encoded, grp_state_key)
