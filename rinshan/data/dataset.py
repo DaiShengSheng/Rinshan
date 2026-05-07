@@ -182,15 +182,6 @@ class MjaiDataset(IterableDataset):
                         prev_encoded["reward_game"] = torch.zeros_like(prev_encoded["reward_game"])
                     else:
                         prev_encoded["reward"] = prev_encoded["reward_game"] + prev_encoded["reward_hand"]
-
-                    # 立直 shaping：若上一步动作是立直宣言，叠加即时 shaping reward
-                    # 这能缩短 credit assignment 链（立直到局结束约 10-15 步 Bellman 展开）
-                    # shaping 值 = (里宝期望 + 一发期望) / 1000，约 0.375~1.875
-                    # 只加到 reward_hand 分支，不影响 game 分支
-                    if prev_encoded.get("is_riichi_action", False):
-                        shaping = prev_encoded.get("riichi_shaping", torch.tensor(0.0))
-                        prev_encoded["reward_hand"] = prev_encoded["reward_hand"] + shaping
-                        prev_encoded["reward"]      = prev_encoded["reward"]      + shaping
                     yield prev_encoded
 
                 prev_by_key[key] = (encoded, grp_state_key)
@@ -259,10 +250,6 @@ def collate_fn(batch: list[dict]) -> dict:
 
         # 字符串字段（game_id 等）直接保留为列表
         if isinstance(vals[0], str):
-            result[k] = vals
-            continue
-        # bool 字段（is_riichi_action 等）
-        if isinstance(vals[0], bool):
             result[k] = vals
             continue
         # int 字段
