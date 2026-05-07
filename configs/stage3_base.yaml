@@ -19,7 +19,7 @@
 stage: 3
 model_preset: base
 stage1_ckpt: /root/autodl-tmp/rinshan/checkpoints/stage1_base/best_v3.pt
-stage2_ckpt: /root/autodl-tmp/rinshan/checkpoints/stage2_base/best.pt
+stage2_ckpt: /root/autodl-tmp/rinshan/checkpoints/stage2_base/best_v4.pt
 
 data_dir: /root/autodl-tmp/rinshan/data/annotated_grp
 # 注意：GRP 2.0 不再把每局 reward 广播到所有 action。
@@ -60,7 +60,7 @@ target_update_every: 100
 arena_gate_games: 200
 arena_parallel_games: 64
 arena_gate_rank_delta_threshold: 0.0
-arena_gate_baseline_ckpt: /root/autodl-tmp/rinshan/checkpoints/stage2_base/best.pt
+arena_gate_baseline_ckpt: /root/autodl-tmp/rinshan/checkpoints/stage2_base/best_v4.pt
 
 dtype: bfloat16
 amp: true
