@@ -507,6 +507,41 @@ class Trainer:
         torch.save(payload, path)
         logger.info(f"Saved checkpoint → {path}")
 
+    def _fix_scheduler_T_max(self):
+        """resume 后，用当前 config 校正 CosineAnnealingLR 的 T_max。
+
+        load_state_dict 会把 checkpoint 里固化的旧 T_max 写回来。
+        若 yaml 里的 total_steps 与训练初始值不同（如从 100k 改成 120k），
+        cosine 会在旧 T_max 处反弹。此方法强制对齐到当前 config。
+        """
+        import math
+        T_max_correct = self.cfg.total_steps - self.cfg.warmup_steps
+        eta_min       = self.cfg.lr * 0.1
+        base_lr       = self.cfg.lr
+
+        # SequentialLR._schedulers[1] 是 CosineAnnealingLR
+        sched_state = self.scheduler.state_dict()
+        cosine_state = sched_state["_schedulers"][1]
+        T_max_old = cosine_state["T_max"]
+
+        if T_max_old == T_max_correct:
+            return  # 已经正确，无需修正
+
+        # 重算当前 step 对应的正确 LR
+        t = cosine_state["last_epoch"]  # cosine 内部计时（= global_step - warmup_steps）
+        new_lr = eta_min + 0.5 * (base_lr - eta_min) * (1 + math.cos(math.pi * t / T_max_correct))
+
+        # 直接修改 scheduler 内部状态
+        cosine_state["T_max"] = T_max_correct
+        cosine_state["_last_lr"] = [new_lr, new_lr]
+        sched_state["_last_lr"]  = [new_lr, new_lr]
+        self.scheduler.load_state_dict(sched_state)
+
+        logger.info(
+            f"[scheduler] T_max corrected: {T_max_old} → {T_max_correct}  "
+            f"lr: {cosine_state['_last_lr'][0]:.4e} → {new_lr:.4e}"
+        )
+
     def load(self, path: Path):
         ckpt = torch.load(path, map_location=self.device, weights_only=True)
         self.step = ckpt["step"]
@@ -526,6 +561,12 @@ class Trainer:
                 self.optimizer.load_state_dict(ckpt["optimizer"])
                 self.scheduler.load_state_dict(ckpt["scheduler"])
                 self.scaler.load_state_dict(ckpt["scaler"])
+                # ── 校正 T_max ──────────────────────────────────────────────
+                # load_state_dict 会把旧 checkpoint 里固化的 T_max 写回来，
+                # 如果 total_steps 在 yaml 里改过（如从 100k 改成 120k），
+                # 必须用当前 config 重新算 T_max 并修正，否则 cosine 会
+                # 在旧 T_max 处反弹回升，相当于进入第二个周期。
+                self._fix_scheduler_T_max()
             else:
                 logger.info("weights-only checkpoint detected: optimizer/scheduler/scaler kept freshly initialized")
         logger.info(f"Loaded checkpoint ← {path} (step {self.step}, lr={self.cfg.lr:.2e})")
