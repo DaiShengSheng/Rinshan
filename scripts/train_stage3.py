@@ -271,12 +271,15 @@ def main():
 
         loss_dict = trainer.train_step(batch)
         step = trainer.step
+        did_update = bool(loss_dict.get("did_update", False))
+        if not did_update:
+            continue
         _update_ema(loss_dict)
 
-        # EMA 摘要行
+        # EMA 摘要行（按 optimizer update step）
         log_every = int(cfg.get("log_every", 100))
         if step % log_every == 0:
-            ema_keys = [("q_loss","q"),("v_loss","v"),("bc","bc"),
+            ema_keys = [("q_loss","q"),("v_loss","v"),("bc_loss","bc"),("cql_loss","cql"),
                         ("belief","bel"),("wait","wait"),("total","total")]
             ema_parts = "  ".join(
                 f"{s}={_ema[k]:.4f}{_trend(k)}"
@@ -288,7 +291,7 @@ def main():
         if step % val_every == 0:
             # 验证集 IQL 损失 + belief 召回率
             trainer.model.eval()
-            val_keys = ["q_loss", "v_loss", "bc", "cql", "belief", "wait", "total"]
+            val_keys = ["q_loss", "v_loss", "bc_loss", "cql_loss", "belief", "wait", "total"]
             val_sums: dict[str, float] = {k: 0.0 for k in val_keys}
             import torch.nn.functional as F
             bel_tp = bel_total = 0

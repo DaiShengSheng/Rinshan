@@ -83,6 +83,7 @@ class Trainer:
     ):
         self.cfg = cfg
         self.step = 0
+        self.micro_step = 0
         self.save_dir = Path(cfg.save_dir)
         self.save_dir.mkdir(parents=True, exist_ok=True)
 
@@ -402,15 +403,22 @@ class Trainer:
                 raise ValueError(f"Stage {self.cfg.stage} not implemented in Trainer")
 
     def train_step(self, batch: dict) -> dict:
-        """执行一步训练，返回 loss 字典"""
+        """执行一步训练，返回 loss 字典。
+
+        step 口径统一为 optimizer update step：
+        - micro_step: 每个 mini-batch +1（仅内部统计梯度累积进度）
+        - step:       每次真正 optimizer.step() 后 +1（用于 warmup/val/save/resume）
+        """
         self.model.train()
         loss, loss_dict = self._forward_and_loss(batch)
 
         # 梯度累积
         loss_scaled = loss / self.cfg.grad_accum_steps
         self.scaler.scale(loss_scaled).backward()
+        self.micro_step += 1
 
-        if (self.step + 1) % self.cfg.grad_accum_steps == 0:
+        did_update = False
+        if self.micro_step % self.cfg.grad_accum_steps == 0:
             self.scaler.unscale_(self.optimizer)
             grad_norm = nn.utils.clip_grad_norm_(
                 self.model.parameters(), self.cfg.max_grad_norm
@@ -423,52 +431,55 @@ class Trainer:
                 self.scaler.update()
                 self.optimizer.zero_grad(set_to_none=True)
                 self.scheduler.step()
+                self.step += 1
+                did_update = True
 
-        self.step += 1
+                # 目标网络 EMA 软更新（Stage 3）
+                if self.cfg.stage == 3 and self.step % self.cfg.target_update_every == 0:
+                    self._update_target_network()
 
-        # 目标网络 EMA 软更新（Stage 3）
-        if self.cfg.stage == 3 and self.step % self.cfg.target_update_every == 0:
-            self._update_target_network()
+                # 定期日志（按 update step）
+                if self.step % self.cfg.log_every == 0:
+                    lr = self.scheduler.get_last_lr()[0]
+                    if self.cfg.stage == 2:
+                        # Stage 2 专用：显示蒸馏核心分量 + belief/wait 辅助
+                        s2_keys = [("kl", "kl"), ("bc", "bc"), ("belief", "bel"),
+                                   ("wait", "wait"), ("total", "total")]
+                        parts = "  ".join(
+                            f"{short}={loss_dict[k]:.4f}"
+                            for k, short in s2_keys if k in loss_dict
+                        )
+                        logger.info(f"[step {self.step}] {parts}  lr={lr:.2e}")
+                    elif self.cfg.stage == 3:
+                        # Stage 3 专用：显示 IQL 主分量 + belief/wait 辅助
+                        s3_keys = [("q_loss", "q"), ("v_loss", "v"), ("bc_loss", "bc"),
+                                   ("cql_loss", "cql"), ("belief", "bel"), ("wait", "wait"),
+                                   ("total", "total")]
+                        parts3 = "  ".join(
+                            f"{short}={loss_dict[k]:.4f}"
+                            for k, short in s3_keys if k in loss_dict
+                        )
+                        logger.info(f"[step {self.step}] {parts3}  lr={lr:.2e}")
+                    else:
+                        # Stage 1 原有逻辑
+                        aux_keys = ["action", "belief", "aux_shanten", "aux_tenpai_prob",
+                                    "aux_deal_in_risk", "aux_opp_tenpai"]
+                        aux_parts = "  ".join(
+                            f"{k.replace('aux_','')}={loss_dict[k]:.3f}"
+                            for k in aux_keys if k in loss_dict
+                        )
+                        logger.info(
+                            f"[step {self.step}] loss={loss_dict['total']:.4f}  lr={lr:.2e}"
+                            + (f"  | {aux_parts}" if aux_parts else "")
+                        )
 
-        # 定期日志
-        if self.step % self.cfg.log_every == 0:
-            lr = self.scheduler.get_last_lr()[0]
-            if self.cfg.stage == 2:
-                # Stage 2 专用：显示蒸馏核心分量 + belief/wait 辅助
-                s2_keys = [("kl", "kl"), ("bc", "bc"), ("belief", "bel"),
-                           ("wait", "wait"), ("total", "total")]
-                parts = "  ".join(
-                    f"{short}={loss_dict[k]:.4f}"
-                    for k, short in s2_keys if k in loss_dict
-                )
-                logger.info(f"[step {self.step}] {parts}  lr={lr:.2e}")
-            elif self.cfg.stage == 3:
-                # Stage 3 专用：显示 IQL 主分量 + belief/wait 辅助
-                s3_keys = [("q_loss", "q"), ("v_loss", "v"), ("bc", "bc"),
-                           ("cql", "cql"), ("belief", "bel"), ("wait", "wait"),
-                           ("total", "total")]
-                parts3 = "  ".join(
-                    f"{short}={loss_dict[k]:.4f}"
-                    for k, short in s3_keys if k in loss_dict
-                )
-                logger.info(f"[step {self.step}] {parts3}  lr={lr:.2e}")
-            else:
-                # Stage 1 原有逻辑
-                aux_keys = ["action", "belief", "aux_shanten", "aux_tenpai_prob",
-                            "aux_deal_in_risk", "aux_opp_tenpai"]
-                aux_parts = "  ".join(
-                    f"{k.replace('aux_','')}={loss_dict[k]:.3f}"
-                    for k in aux_keys if k in loss_dict
-                )
-                logger.info(
-                    f"[step {self.step}] loss={loss_dict['total']:.4f}  lr={lr:.2e}"
-                    + (f"  | {aux_parts}" if aux_parts else "")
-                )
+                # 定期保存（按 update step）
+                if self.step % self.cfg.save_every == 0:
+                    self.save(self.save_dir / f"checkpoint_{self.step}.pt")
 
-        # 定期保存
-        if self.step % self.cfg.save_every == 0:
-            self.save(self.save_dir / f"checkpoint_{self.step}.pt")
-
+        loss_dict["did_update"] = did_update
+        loss_dict["micro_step"] = self.micro_step
+        loss_dict["update_step"] = self.step
         return loss_dict
 
     def _update_target_network(self):
@@ -484,6 +495,7 @@ class Trainer:
         if self.cfg.weights_only_save:
             payload = {
                 "step":         self.step,
+                "micro_step":   self.micro_step,
                 "stage":        self.cfg.stage,
                 "model":        self.model.state_dict(),
                 "target_model": self.target_model.state_dict()
@@ -492,6 +504,7 @@ class Trainer:
         else:
             payload = {
                 "step":         self.step,
+                "micro_step":   self.micro_step,
                 "stage":        self.cfg.stage,
                 "model":        self.model.state_dict(),
                 "target_model": self.target_model.state_dict()
@@ -545,6 +558,8 @@ class Trainer:
     def load(self, path: Path):
         ckpt = torch.load(path, map_location=self.device, weights_only=True)
         self.step = ckpt["step"]
+        # 旧 checkpoint 不含 micro_step；默认对齐到完整 update 边界。
+        self.micro_step = int(ckpt.get("micro_step", self.step * self.cfg.grad_accum_steps))
         self.model.load_state_dict(ckpt["model"])
         if self.target_model and ckpt.get("target_model"):
             self.target_model.load_state_dict(ckpt["target_model"])

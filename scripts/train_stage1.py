@@ -202,10 +202,12 @@ def main():
 
         loss_dict = trainer.train_step(batch)
         step = trainer.step
+        did_update = bool(loss_dict.get("did_update", False))
+        if not did_update:
+            continue
 
-        # 梯度累积完成后主动释放显存碎片
-        if step % trainer_cfg.grad_accum_steps == 0:
-            torch.cuda.empty_cache()
+        # 梯度累积完成后主动释放显存碎片（按真正 update 后触发）
+        torch.cuda.empty_cache()
 
         # 验证
         if step % val_every == 0:

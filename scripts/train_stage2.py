@@ -277,6 +277,9 @@ def main():
 
         loss_dict = trainer.train_step(batch)
         step = trainer.step
+        did_update = bool(loss_dict.get("did_update", False))
+        if not did_update:
+            continue
         _update_ema(loss_dict)
 
         # 定期保存后，把 best_val_loss / patience_counter 追加进 checkpoint
