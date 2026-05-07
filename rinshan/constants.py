@@ -91,6 +91,14 @@ HONBA_OFFSET     = 1337  # 1337-1345: honba 0-8 (bins)
 KYOTAKU_OFFSET   = 1346  # 1346-1350: kyotaku 0-4
 TILES_OFFSET     = 1351  # 1351-1359: tiles_left bins 0-8
 
+# ── 四家分数 token（v2 新增）──────────────────────────────────────────────
+# 分数范围 -60000 ~ +90000，均匀分 16 bin，每家 16 个 token，4 家共 64 个
+# 分配在 RIICHI_FURITEN_OFFSET(1544)+4=1548 之后，即 1548-1611
+# 计算公式：SCORE_OFFSET + seat*16 + bin
+#   bin = clamp(int((score + 60000) / 10000), 0, 15)
+#   覆盖 -60k(bin=0) ~ +90k(bin=15，实际>=+90k)
+SCORE_OFFSET     = 1548  # 1548-1611: 4 seats × 16 bins
+
 # ─────────────────────────────────────────────
 # 进行（Progression）Token 空间
 # 从 513 开始，追加在动作空间之后
@@ -128,12 +136,19 @@ RIICHI_JUNME_OFFSET  = 1508  # 1508-1543
 # 立直振听 flag：4 seats
 RIICHI_FURITEN_OFFSET = 1544  # 1544-1547
 
-VOCAB_SIZE = 1548  # 扩展：+36 立直巡目 + 4 振听
+VOCAB_SIZE = 1612  # v2：+64 分数 token（4 seats × 16 bins）
+# 分布地图：
+#   0-512    动作/tile/special token
+#   513-1336 Progression token
+#   1337-1359 honba/kyotaku/tiles meta
+#   1360-1507 PROG_DISCARD_TSUMOGIRI
+#   1508-1547 RIICHI_JUNME + RIICHI_FURITEN
+#   1548-1611 SCORE (4 seats x 16 bins)
 
 # ─────────────────────────────────────────────
 # 序列长度常量
 # ─────────────────────────────────────────────
-MAX_GAME_META_LEN       =  16   # 场风/局数/本场/供托/四家分数(RBF) 等
+MAX_GAME_META_LEN       =  20   # 场风/局数/本场/供托/剩余牌 + 四家分数(各1 token)
 MAX_DORA_LEN            =   5   # 最多5张宝牌指示牌
 MAX_HAND_LEN            =  14   # 手牌最多14张
 MAX_MELD_LEN            =  16   # 副露最多4组 × 4张

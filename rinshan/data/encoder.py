@@ -25,7 +25,7 @@ from rinshan.constants import (
     TILE_OFFSET, AKA_OFFSET, DISCARD_OFFSET,
     RIICHI_TOKEN, TSUMO_AGARI_TOKEN, RON_AGARI_TOKEN, RYUKYOKU_TOKEN, PASS_TOKEN,
     WIND_OFFSET, ROUND_OFFSET, GAME_START_TOKEN, ROUND_START_TOKEN, PAD_TOKEN,
-    HONBA_OFFSET, KYOTAKU_OFFSET, TILES_OFFSET,
+    HONBA_OFFSET, KYOTAKU_OFFSET, TILES_OFFSET, SCORE_OFFSET,
     # 立直上下文 token
     RIICHI_JUNME_OFFSET, RIICHI_FURITEN_OFFSET,
     # 进行 token
@@ -38,24 +38,55 @@ from rinshan.constants import (
     MAX_PROGRESSION_LEN, MAX_CANDIDATES_LEN, MAX_SEQ_LEN,
     MAX_OPP_HAND_LEN, MAX_ORACLE_SEQ_LEN,
     NUM_TILE_TYPES, VOCAB_SIZE,
+    RIICHI_TOKEN,  # 用于立直 shaping 判断（重复 import 无害，明确标注用途）
 )
 from rinshan.tile import Tile
 from .annotation import Annotation
 
 # ─────────────────────────────────────────────
-# RBF 编码（处理分数等数值特征）
+# 分数 → token id（16 bin，覆盖 -60k ~ +90k）
 # ─────────────────────────────────────────────
-# 分数范围大约 -60000 ~ +90000，用 8 个 RBF 中心
-_SCORE_CENTERS = np.array([-30000, -10000, 0, 10000, 20000, 30000, 50000, 70000],
-                           dtype=np.float32)
-_SCORE_SIGMA   = 15000.0
+_SCORE_BIN_MIN   = -60000
+_SCORE_BIN_WIDTH =  10000
+_SCORE_BIN_NUM   =  16
 
-def rbf_encode_score(score: int) -> list[float]:
-    x = float(score)
-    return [
-        float(np.exp(-((x - c) ** 2) / (2 * _SCORE_SIGMA ** 2)))
-        for c in _SCORE_CENTERS
-    ]
+def score_to_token(score: int, seat: int) -> int:
+    """把一家的绝对分数映射到 SCORE token id。"""
+    bin_idx = int((score - _SCORE_BIN_MIN) / _SCORE_BIN_WIDTH)
+    bin_idx = max(0, min(_SCORE_BIN_NUM - 1, bin_idx))
+    return SCORE_OFFSET + seat * _SCORE_BIN_NUM + bin_idx
+
+
+# ─────────────────────────────────────────────
+# 立直 shaping：立直宣言时的即时奖励估算
+# ─────────────────────────────────────────────
+# 根据宝牌指示牌数量估算「如果立直和了，里宝期望额外价值」
+# 并加上一发期望（约 25% 概率 × 1翻收益）
+# 标准化到和 hand_reward 同量级（÷1000）
+_DORA_IND_TO_TILE = {  # 宝牌指示牌 tile_id → 实际宝牌 tile_id（+1 循环）
+    # 简化：每张指示牌贡献约 +500点 期望（均值，含庄家/子家平均）
+}
+_AVG_DORA_VALUE   =  500  # 每张宝牌指示牌对应约 500点 里宝期望
+_IPPATSU_PROB     = 0.25  # 立直后约 25% 概率一发
+_IPPATSU_VALUE    = 1500  # 一发多 1 翻，约 +1500点 期望（含荣/自摸平均）
+
+def calc_riichi_shaping(ann) -> float:
+    """
+    立直宣言时的即时 shaping reward（仅在候选动作包含立直时有意义）。
+
+    = (里宝期望 + 一发期望) / 1000
+
+    里宝期望 = n_dora_indicators × _AVG_DORA_VALUE
+    一发期望 = _IPPATSU_PROB × _IPPATSU_VALUE
+
+    注意：这是一个粗略的正向 shaping，帮助缩短 credit assignment 链。
+    精确值由 IQL Bellman 链最终学习，不需要完全准确。
+    """
+    n_dora = len(ann.dora_indicators)
+    ura_ev = n_dora * _AVG_DORA_VALUE
+    ippatsu_ev = _IPPATSU_PROB * _IPPATSU_VALUE
+    return (ura_ev + ippatsu_ev) / 1000.0
+
 
 
 # ─────────────────────────────────────────────
@@ -105,7 +136,9 @@ class GameEncoder:
         # 剩余张数（0-70 → 0-8 bins）— dedicated offset, no collision
         tiles_bin = min(ann.tiles_left // 9, 8)
         tokens_list.append(TILES_OFFSET + tiles_bin)
-        # 暂不编码分数 RBF（需要数值 token 扩展，后续在 v2 加入）
+        # 四家分数（旋转后 [0]=己方）各 1 个 token，16 bin 覆盖 -60k ~ +90k
+        for seat, score in enumerate(ann.scores[:4]):
+            tokens_list.append(score_to_token(score, seat))
         # 补 PAD 到 MAX_GAME_META_LEN
         while len(tokens_list) < MAX_GAME_META_LEN:
             tokens_list.append(PAD_TOKEN)
@@ -246,10 +279,17 @@ class GameEncoder:
             "belief_tokens":   torch.tensor(belief_tokens_list,   dtype=torch.long),
             "belief_pad_mask": torch.tensor(belief_pad_mask_list, dtype=torch.bool),
             "action_idx":      torch.tensor(ann.action_chosen,    dtype=torch.long),
+            # 本条样本的选择是否是立直宣言（供 Stage 3 shaping 用，不入模型）
+            "is_riichi_action": bool(
+                ann.action_chosen < len(cands) and
+                cands[ann.action_chosen] == RIICHI_TOKEN
+            ),
             "reward":          torch.tensor(ann.grp_reward,       dtype=torch.float32),
             "reward_game":     torch.tensor(ann.grp_reward,       dtype=torch.float32),
             "reward_hand":     torch.tensor(ann.hand_reward,      dtype=torch.float32),
             "is_done":         torch.tensor(ann.is_done,          dtype=torch.bool),
+            # 立直 shaping（Stage 3 dataset 会在立直动作上叠加此值）
+            "riichi_shaping":  torch.tensor(calc_riichi_shaping(ann), dtype=torch.float32),
             # Oracle
             "actual_hands":    torch.tensor(actual_hands, dtype=torch.float32)
                                 if actual_hands is not None else None,
