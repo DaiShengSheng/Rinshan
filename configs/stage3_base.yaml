@@ -31,6 +31,13 @@ lr: 1e-4
 weight_decay: 0.01
 warmup_steps: 2000
 total_steps: 150_000
+# cosine_t_max: cosine 退火的完整周期长度（optimizer update step 数）。
+# 不填（或填 0）时退化为旧行为：total_steps - warmup_steps。
+# 设置后 total_steps 只控制"训练跑多少步"，两者完全独立。
+# 典型用法：
+#   先探索 50k 步 → total_steps: 50_000, cosine_t_max: 150000
+#   发现好了继续跑 → total_steps: 150_000，cosine_t_max 不变，LR 曲线形状不变
+cosine_t_max: 148000   # = 150000 - warmup_steps(2000)，与初始设计一致
 weights_only_save: false
 batch_size: 1024          # compile=True 下 93GB/96GB，effective batch=2048
 grad_accum_steps: 2       # 等效 batch=1024

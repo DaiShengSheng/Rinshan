@@ -338,6 +338,7 @@ def main():
         weight_decay = float(cfg.get("weight_decay", 0.01)),
         warmup_steps = int(cfg.get("warmup_steps", 100)),
         total_steps  = n_iters * train_steps + 200,
+        cosine_t_max = int(cfg.get("cosine_t_max", 0)),  # 0 = 自动推断
         save_dir     = str(save_dir),
         save_every   = 999_999,   # 由外层控制
         log_every    = int(cfg.get("log_every_steps", 50)),

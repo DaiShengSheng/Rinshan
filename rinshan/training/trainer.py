@@ -49,6 +49,11 @@ class TrainerConfig:
     # ── LR Schedule ───────────────────
     warmup_steps: int   = 1000
     total_steps: int    = 100_000
+    # cosine_t_max: cosine 退火的完整周期长度（步数）。
+    # 不填（或填 0）时自动退化为旧行为：total_steps - warmup_steps。
+    # 设置后 total_steps 只控制「训练跑多少步」，两者完全独立。
+    # 典型用法：先跑 50k 探索，cosine_t_max=150000 保持完整 LR 曲线不变形。
+    cosine_t_max: int = 0
 
     # ── 保存 ──────────────────────────
     save_dir: str = "checkpoints"
@@ -174,8 +179,9 @@ class Trainer:
         warmup_scheduler   = LinearLR(
             self.optimizer, start_factor=0.01, total_iters=cfg.warmup_steps
         )
+        _cosine_t_max = cfg.cosine_t_max if cfg.cosine_t_max > 0 else (cfg.total_steps - cfg.warmup_steps)
         cosine_scheduler   = CosineAnnealingLR(
-            self.optimizer, T_max=cfg.total_steps - cfg.warmup_steps, eta_min=cfg.lr * 0.1
+            self.optimizer, T_max=_cosine_t_max, eta_min=cfg.lr * 0.1
         )
         self.scheduler = SequentialLR(
             self.optimizer,
@@ -528,7 +534,10 @@ class Trainer:
         cosine 会在旧 T_max 处反弹。此方法强制对齐到当前 config。
         """
         import math
-        T_max_correct = self.cfg.total_steps - self.cfg.warmup_steps
+        T_max_correct = (
+            self.cfg.cosine_t_max if self.cfg.cosine_t_max > 0
+            else (self.cfg.total_steps - self.cfg.warmup_steps)
+        )
         eta_min       = self.cfg.lr * 0.1
         base_lr       = self.cfg.lr
 

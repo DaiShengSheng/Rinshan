@@ -149,6 +149,7 @@ def main():
         grad_accum_steps = int(cfg.get("grad_accum_steps", 1)),   # ← 修复：之前漏传，永远是1
         warmup_steps     = int(cfg.get("warmup_steps", 500)),
         total_steps      = int(cfg.get("total_steps", 100_000)),
+        cosine_t_max     = int(cfg.get("cosine_t_max", 0)),
         save_dir         = cfg.get("save_dir", "checkpoints/stage3"),
         save_every       = int(cfg.get("save_every", 5000)),
         log_every        = int(cfg.get("log_every", 100)),
