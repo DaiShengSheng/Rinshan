@@ -2,12 +2,17 @@
 migrate_vocab_score.py — 将旧 checkpoint（VOCAB_SIZE=1548）的 token embedding
 扩容到新词表大小（VOCAB_SIZE=1612），新增的 64 个分数 token 用小随机值初始化。
 
+同时处理两侧 token_embed：
+  - transformer.token_embed.weight : (1548, 768) → (1612, 768)
+  - belief_net.token_embed.weight  : (1548, 256) → (1612, 256)
+
 Usage:
     python scripts/migrate_vocab_score.py \
-        --src  /root/autodl-tmp/rinshan/checkpoints/stage2_base/best.pt \
-        --dst  /root/autodl-tmp/rinshan/checkpoints/stage2_base/best_v4.pt
+        --src  checkpoints/stage2_best_50000_v3.pt \
+        --dst  checkpoints/stage2_best_50000_v4.pt
 
 注意：只修改 token_embed.weight，其余参数原样保留。
+新的 Stage2 训练（起点已是 VOCAB_SIZE=1612 的 Stage1 权重）不需要运行此脚本。
 """
 from __future__ import annotations
 
@@ -20,52 +25,67 @@ import torch
 OLD_VOCAB = 1548
 NEW_VOCAB = 1612  # +64 分数 token（4 seats × 16 bins），SCORE_OFFSET=1548
 
+# 需要扩容的所有 token_embed key（带/不带 _orig_mod. 前缀均兼容）
+_EMBED_KEYS = [
+    "transformer.token_embed.weight",
+    "belief_net.token_embed.weight",
+]
+
+
+def _expand_embed(sd: dict, key: str, label: str) -> bool:
+    """在 state_dict sd 中扩容指定 key。返回是否实际做了修改。"""
+    # 兼容 _orig_mod. 前缀（torch.compile 保存格式）
+    real_key = key
+    if real_key not in sd:
+        real_key = f"_orig_mod.{key}"
+        if real_key not in sd:
+            print(f"  [{label}] key 不存在，跳过：{key}")
+            return False
+
+    old_w = sd[real_key]
+    old_v, dim = old_w.shape
+
+    if old_v == NEW_VOCAB:
+        print(f"  [{label}] {real_key}: 已是新词表 {NEW_VOCAB}，无需迁移。")
+        return False
+
+    if old_v != OLD_VOCAB:
+        raise ValueError(
+            f"[{label}] {real_key}: 期望旧词表大小 {OLD_VOCAB}，实际 {old_v}"
+        )
+
+    new_rows = torch.randn(NEW_VOCAB - OLD_VOCAB, dim, dtype=old_w.dtype) * 0.02
+    sd[real_key] = torch.cat([old_w, new_rows], dim=0)
+    print(f"  [{label}] {real_key}: {tuple(old_w.shape)} → {tuple(sd[real_key].shape)}")
+    return True
+
 
 def migrate(src: Path, dst: Path) -> None:
     print(f"Loading  {src}")
     ckpt = torch.load(src, map_location="cpu", weights_only=True)
 
-    model_sd = ckpt.get("model") or ckpt  # 兼容裸权重格式
-    key = "transformer.token_embed.weight"
+    model_sd   = ckpt.get("model") or ckpt
+    target_sd  = ckpt.get("target_model")
 
-    if key not in model_sd:
-        # 可能带 _orig_mod. 前缀
-        key_orig = f"_orig_mod.{key}"
-        if key_orig in model_sd:
-            key = key_orig
-        else:
-            raise KeyError(f"找不到 token embedding key，已有 keys 前缀：{list(model_sd.keys())[:10]}")
+    any_changed = False
+    for key in _EMBED_KEYS:
+        any_changed |= _expand_embed(model_sd, key, "model")
+        if target_sd is not None:
+            _expand_embed(target_sd, key, "target")
 
-    old_w = model_sd[key]          # (OLD_VOCAB, dim)
-    old_v, dim = old_w.shape
-    print(f"Old embedding shape: {old_w.shape}")
-
-    if old_v == NEW_VOCAB:
-        print("词表已是新版本，无需迁移。")
-        torch.save(ckpt, dst)
-        return
-
-    if old_v != OLD_VOCAB:
-        raise ValueError(f"期望旧词表大小 {OLD_VOCAB}，实际 {old_v}")
-
-    # 新增的 64 个 embedding，用 N(0, 0.02) 初始化（与 nn.Embedding 默认一致）
-    new_rows = torch.randn(NEW_VOCAB - OLD_VOCAB, dim, dtype=old_w.dtype) * 0.02
-    new_w = torch.cat([old_w, new_rows], dim=0)   # (NEW_VOCAB, dim)
-    print(f"New embedding shape: {new_w.shape}")
-
-    model_sd[key] = new_w
-
-    # 如果 target_model 也有同名 key，一并迁移
-    target_sd = ckpt.get("target_model")
-    if target_sd is not None and key in target_sd:
-        old_t = target_sd[key]
-        new_rows_t = torch.randn(NEW_VOCAB - OLD_VOCAB, dim, dtype=old_t.dtype) * 0.02
-        target_sd[key] = torch.cat([old_t, new_rows_t], dim=0)
-        print("target_model embedding 同步扩容。")
+    if not any_changed:
+        print("所有 embedding 已是新版本，无需迁移，原样保存。")
 
     dst.parent.mkdir(parents=True, exist_ok=True)
     torch.save(ckpt, dst)
     print(f"Saved → {dst}")
+
+    # 最终验证
+    print("\n── 验证 ──")
+    ckpt2 = torch.load(dst, map_location="cpu", weights_only=True)
+    sd2   = ckpt2.get("model") or ckpt2
+    for k in sorted(k for k in sd2.keys() if "embed" in k):
+        print(f"  {k}: {tuple(sd2[k].shape)}")
 
 
 def main() -> None:
