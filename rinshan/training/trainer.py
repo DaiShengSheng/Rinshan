@@ -24,6 +24,7 @@ from rinshan.model import RinshanModel
 from rinshan.model.transformer import TransformerConfig
 from rinshan.constants import TARGET_EMA_TAU
 from .losses import stage1_loss, distill_loss, iql_loss, compute_q_target
+from rinshan.constants import RIICHI_TOKEN as _RIICHI_TOKEN
 
 logger = logging.getLogger(__name__)
 
@@ -338,6 +339,16 @@ class Trainer:
 
                 done = self._to_device(batch.get("done", batch.get("is_done"))).bool()
 
+                # RIICHI 冷启动豁免 mask：Stage 1/2 无立直基线，BC anchor 对其无效
+                # tokens 序列尾部 MAX_CANDIDATES_LEN 位置即 candidates 区域，
+                # 取 action_idx 对应的 token，判断是否是 RIICHI_TOKEN(497)
+                from rinshan.constants import MAX_CANDIDATES_LEN
+                _tok_seq   = self._to_device(batch["tokens"])          # (B, S)
+                _cand_reg  = _tok_seq[:, -MAX_CANDIDATES_LEN:]         # (B, C)
+                _chosen_t  = _cand_reg[torch.arange(action_idx.shape[0],
+                                       device=action_idx.device), action_idx]  # (B,)
+                riichi_mask = (_chosen_t == _RIICHI_TOKEN)             # (B,) bool
+
                 # 在线场景允许通过 batch["_online_cql_weight"] 覆盖 CQL 权重
                 cql_w = batch.get("_online_cql_weight", None)
                 extra_kwargs = {}
@@ -375,6 +386,7 @@ class Trainer:
                     hand_expectile=self.cfg.hand_expectile,
                     game_reward_weight=self.cfg.game_reward_weight,
                     hand_reward_weight=self.cfg.hand_reward_weight,
+                    riichi_action_mask=riichi_mask,
                     **extra_kwargs,
                 )
 
@@ -458,9 +470,9 @@ class Trainer:
                         logger.info(f"[step {self.step}] {parts}  lr={lr:.2e}")
                     elif self.cfg.stage == 3:
                         # Stage 3 专用：显示 IQL 主分量 + belief/wait 辅助
-                        s3_keys = [("q_loss", "q"), ("v_loss", "v"), ("bc_loss", "bc"),
-                                   ("cql_loss", "cql"), ("belief", "bel"), ("wait", "wait"),
-                                   ("total", "total")]
+                        s3_keys = [("q_loss","q"),("v_loss","v"),("bc_loss","bc"),
+                                    ("cql_loss","cql"),("belief","bel"),("wait","wait"),
+                                    ("riichi_bc_exempt","r_ex"),("total","total")]
                         parts3 = "  ".join(
                             f"{short}={loss_dict[k]:.4f}"
                             for k, short in s3_keys if k in loss_dict

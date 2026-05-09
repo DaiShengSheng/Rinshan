@@ -99,6 +99,49 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 logger = logging.getLogger("train_stage3")
 
 
+def _init_riichi_embed(model, device: str = "cpu") -> None:
+    """
+    RIICHI token (497) embedding 冷启动初始化。
+
+    Stage 1/2 的训练数据里，RIICHI_TOKEN 从未作为 *候选动作* 出现在
+    candidate 区域中（它只出现在 progression 序列里），导致 token_embed[497]
+    的 embedding 向量虽然存在，但自始至终没有受到来自 Q-value head 方向的
+    有意义的梯度，等价于随机初始化状态。
+
+    修复方法：用语义最相近的 special-action token 的 embedding 均值来初始化
+    RIICHI_TOKEN 的 embedding，给 Stage 3 的 Bellman 回传一个合理的起点。
+
+    邻居选择依据：
+      TSUMO_AGARI(498), RON_AGARI(499), RYUKYOKU(500), PASS(501)
+      均为 special action token，与 RIICHI 同属"特殊操作"类别，且都经过完整
+      的 Stage 1/2 训练，其 embedding 已编码了"特殊决策点"的语义。
+
+    注意：PROG_RIICHI_BASE (665-668) 是进行序列里的"他家立直事件"token，
+    语义为「观察到某人立直」，而非「我宣言立直」，两者不可混用。
+    """
+    from rinshan.constants import RIICHI_TOKEN, TSUMO_AGARI_TOKEN, RON_AGARI_TOKEN
+    from rinshan.constants import RYUKYOKU_TOKEN, PASS_TOKEN
+
+    # 找到 token embedding 层（兼容 torch.compile 包装后的 OptimizedModule）
+    try:
+        embed = model.transformer.token_embed
+    except AttributeError:
+        # torch.compile 后模型可能被包成 _orig_mod
+        embed = model._orig_mod.transformer.token_embed
+
+    neighbor_ids = [TSUMO_AGARI_TOKEN, RON_AGARI_TOKEN, RYUKYOKU_TOKEN, PASS_TOKEN]
+    with torch.no_grad():
+        neighbors = torch.stack([embed.weight[i] for i in neighbor_ids])  # (4, dim)
+        mean_vec  = neighbors.mean(0)                                      # (dim,)
+        old_norm  = embed.weight[RIICHI_TOKEN].norm().item()
+        embed.weight[RIICHI_TOKEN].copy_(mean_vec)
+        new_norm  = embed.weight[RIICHI_TOKEN].norm().item()
+    logger.info(
+        "RIICHI embed init: neighbors=%s  old_norm=%.4f → new_norm=%.4f",
+        neighbor_ids, old_norm, new_norm,
+    )
+
+
 def main():
     if len(sys.argv) < 2:
         print("Usage: python train_stage3.py <config.yaml> --stage1_ckpt <path>")
@@ -200,6 +243,10 @@ def main():
         trainer.model.load_state_dict(s2_ckpt["model"], strict=False)
         trainer.target_model.load_state_dict(s2_ckpt["model"], strict=False)
         logger.info("Target network initialized with Stage 2 weights (strict=False)")
+        # RIICHI embedding 冷启动初始化（Stage 1/2 未训练过 RIICHI 候选）
+        if cfg.get("reinit_riichi_embed", True):
+            _init_riichi_embed(trainer.model, device=str(device))
+            _init_riichi_embed(trainer.target_model, device=str(device))
     elif stage1_ckpt and Path(stage1_ckpt).exists():
         logger.info(f"Loading Stage 1 weights from {stage1_ckpt}")
         s1_ckpt = torch.load(stage1_ckpt, map_location=device, weights_only=True)
@@ -207,6 +254,10 @@ def main():
         # 目标网络也初始化为相同权重
         trainer.target_model.load_state_dict(s1_ckpt["model"], strict=False)
         logger.info("Target network initialized with Stage 1 weights (strict=False)")
+        # RIICHI embedding 冷启动初始化（Stage 1 未训练过 RIICHI 候选）
+        if cfg.get("reinit_riichi_embed", True):
+            _init_riichi_embed(trainer.model, device=str(device))
+            _init_riichi_embed(trainer.target_model, device=str(device))
     else:
         logger.warning("No checkpoint or stage1_ckpt/stage2_ckpt found, training from scratch")
 

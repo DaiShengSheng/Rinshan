@@ -83,6 +83,13 @@ A full-information teacher observes the complete game state; a partial-informati
 **Stage 3 — Offline IQL**
 Implicit Q-Learning on the annotated dataset with GRP-derived dense rewards. The online model is trained against an EMA target network. Conservative Q-Learning (CQL) regularization prevents value overestimation on out-of-distribution actions.
 
+**Riichi cold-start fix**: Because Stage 1/2 never place `RIICHI_TOKEN` (497) in the candidate region, its embedding is never updated by Q-value gradients and remains in a near-random state at the start of Stage 3. Two fixes are applied automatically when loading a Stage 1/2 checkpoint:
+
+1. **Embedding re-initialisation** (`reinit_riichi_embed: true` in the Stage 3 config): the RIICHI token embedding is replaced with the mean of its nearest semantic neighbours — `TSUMO_AGARI`, `RON_AGARI`, `RYUKYOKU`, `PASS` — which have been fully trained. This gives the Bellman back-propagation a stable starting point.
+2. **AWR BC-anchor exemption**: the advantage-weighted behavioural cloning term that anchors Stage 3 to the Stage 2 baseline is masked out for samples where `action_chosen == RIICHI`. Stage 2 has no riichi baseline, so anchoring to it would inject random noise into the RIICHI Q-value. With the mask, RIICHI Q-values are driven entirely by Bellman targets.
+
+Set `reinit_riichi_embed: false` when resuming from an existing Stage 3 checkpoint (the embedding has already been trained).
+
 **Stage 4 — Online Self-Play**
 Agents play against themselves and past checkpoints, updating from real game outcomes rather than GRP estimates. A `League` pool of historical checkpoints is maintained to prevent strategy collapse.
 

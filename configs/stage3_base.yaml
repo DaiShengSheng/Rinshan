@@ -21,6 +21,15 @@ model_preset: base
 stage1_ckpt: /root/autodl-tmp/rinshan/checkpoints/stage1_base/best_v3.pt
 stage2_ckpt: /root/autodl-tmp/rinshan/checkpoints/stage2_base/best_v4_fixed.pt
 
+# ── RIICHI 冷启动初始化 ───────────────────────────────────────────────────────
+# Stage 1/2 的候选区从未出现 RIICHI_TOKEN(497)，其 embedding 等价于随机初始化。
+# True（默认）：从 Stage 2 / Stage 1 权重加载后，用相邻 special-action token
+#   (TSUMO/RON/RYUKYOKU/PASS) 的 embedding 均值覆盖 RIICHI 的 embedding，
+#   为 Bellman 回传提供合理起点。
+# False：禁用此初始化（仅在已有 Stage 3 中间 checkpoint 续训时应设为 False，
+#   因为此时 RIICHI embedding 已经在 Stage 3 中得到过训练）。
+reinit_riichi_embed: true
+
 data_dir: /root/autodl-tmp/rinshan/data/annotated_grp
 # 注意：GRP 2.0 不再把每局 reward 广播到所有 action。
 # MjaiDataset(stage=3) 会仅在 GRP 游戏状态变化时把 reward 记到该局最后一个 action。

@@ -5,6 +5,9 @@ model_preset: large
 stage1_ckpt: checkpoints/stage1_large/best.pt
 stage2_ckpt: checkpoints/stage2_large/best.pt
 
+# RIICHI 冷启动初始化（见 stage3_base.yaml 注释，续训时请改为 false）
+reinit_riichi_embed: true
+
 data_dir: data/annotated_grp
 val_ratio: 0.02
 shuffle_buffer: 5000

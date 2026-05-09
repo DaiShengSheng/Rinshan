@@ -213,6 +213,7 @@ def iql_loss(
     adv_clip: float = 20.0,
     awr_temperature: float = 3.0,
     awr_max_weight: float = 20.0,
+    riichi_action_mask: Optional[torch.Tensor] = None,  # (B,) bool，True = 本样本选择了 RIICHI
     q_game: Optional[torch.Tensor] = None,
     v_game: Optional[torch.Tensor] = None,
     v_next_game: Optional[torch.Tensor] = None,
@@ -237,6 +238,12 @@ def iql_loss(
     3. hand 分支：负责局内得失点价值
     4. CQL：保守约束
     5. AWR 风格 advantage-weighted BC anchor，防止策略脱离 Stage2 基线过快。
+
+    RIICHI 冷启动豁免：
+    Stage 1/2 没有立直训练样本，token 497 的 embedding 从未经过有意义的监督。
+    BC anchor 对 RIICHI 动作无有效 Stage2 基线——用随机信号做正则会主动干扰
+    IQL 对立直的真实学习。将 riichi_action_mask=True 的样本 AWR 权重清零，
+    使 RIICHI 的 Q 值完全由 Bellman 回传驱动，而非 BC 噪声锚定。
     """
     B = q.shape[0]
     losses = {}
@@ -326,6 +333,10 @@ def iql_loss(
         taken_log_prob = log_probs[idx, action_idx]
         adv_for_policy = (q_target.detach() - v.detach()).clamp(-adv_clip, adv_clip)
         weights = torch.exp(adv_for_policy / max(awr_temperature, 1e-6)).clamp(max=awr_max_weight)
+        # RIICHI 冷启动豁免：Stage2 对立直无基线，BC 权重清零，避免随机信号锚定立直 Q 值
+        if riichi_action_mask is not None and riichi_action_mask.any():
+            weights = weights * (~riichi_action_mask).float()
+            losses["riichi_bc_exempt"] = float(riichi_action_mask.sum().item())
         bc_loss = -(weights * taken_log_prob).mean()
         losses["bc_loss"] = float(bc_loss.detach().cpu())
         losses["awr_weight_mean"] = float(weights.detach().mean().cpu())
