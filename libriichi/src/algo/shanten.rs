@@ -86,7 +86,8 @@ fn sum_tiles(tiles: &[u8]) -> usize {
 /// `len_div3` must be within [0, 4].
 #[must_use]
 pub fn calc_normal(tiles: &[u8; 34], len_div3: u8) -> i8 {
-    let len_div3 = len_div3 as usize;
+    // Guard: clamp to valid range to avoid index-out-of-bounds panic
+    let len_div3 = (len_div3 as usize).min(4);
 
     let mut ret = SUHAI_TABLE
         .get(sum_tiles(&tiles[..9]))

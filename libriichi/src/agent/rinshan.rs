@@ -292,6 +292,25 @@ impl RinshanBatchAgent {
         m.insert("can_riichi".into(), json::Value::Bool(cans.can_riichi));
         m.insert("can_ankan".into(), json::Value::Bool(cans.can_ankan));
         m.insert("can_kakan".into(), json::Value::Bool(cans.can_kakan));
+
+        // Pass Rust-authoritative ankan/kakan tile lists so Python never needs
+        // to rely on tracker.ankan_candidates() / tracker.kakan_candidates().
+        if cans.can_ankan {
+            let tiles: Vec<json::Value> = state
+                .ankan_candidates()
+                .iter()
+                .map(|t| json::Value::String(libriichi_tile_to_rinshan(&t.to_string()).to_owned()))
+                .collect();
+            m.insert("ankan_candidates".into(), json::Value::Array(tiles));
+        }
+        if cans.can_kakan {
+            let tiles: Vec<json::Value> = state
+                .kakan_candidates()
+                .iter()
+                .map(|t| json::Value::String(libriichi_tile_to_rinshan(&t.to_string()).to_owned()))
+                .collect();
+            m.insert("kakan_candidates".into(), json::Value::Array(tiles));
+        }
         m.insert(
             "can_ryukyoku".into(),
             json::Value::Bool(cans.can_ryukyoku),

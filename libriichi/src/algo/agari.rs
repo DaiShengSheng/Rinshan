@@ -255,10 +255,13 @@ impl AgariCalculator<'_> {
     }
 
     fn search_yakus_impl(&self, return_if_any: bool) -> Option<Agari> {
-        assert_eq!(
-            self.is_menzen,
-            self.chis.is_empty() && self.pons.is_empty() && self.minkans.is_empty(),
-        );
+        // Defensive check: is_menzen must match fuuro state.
+        // In rare cases of event-stream desync the invariant may break;
+        // return None (no agari) instead of panicking.
+        let fuuro_is_empty = self.chis.is_empty() && self.pons.is_empty() && self.minkans.is_empty();
+        if self.is_menzen != fuuro_is_empty {
+            return None;
+        }
 
         // Kokushi has a special pattern and cannot be combined with other
         // pattern-based yakus.

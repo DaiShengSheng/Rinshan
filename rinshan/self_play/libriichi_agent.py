@@ -61,13 +61,25 @@ from rinshan.tile import Tile
 
 
 _VALID_DISCARD_TOKEN_MAP = {
+    # 数牌（Rinshan 格式）
     **{f"{n}m": DISCARD_OFFSET + (n - 1) for n in range(1, 10)},
     **{f"{n}p": DISCARD_OFFSET + (9 + n - 1) for n in range(1, 10)},
     **{f"{n}s": DISCARD_OFFSET + (18 + n - 1) for n in range(1, 10)},
+    # 字牌（Rinshan 格式 "1z~7z"）
     **{f"{n}z": DISCARD_OFFSET + (27 + n - 1) for n in range(1, 8)},
+    # 字牌（libriichi 格式 "E/S/W/N/P/F/C"）
+    "E": DISCARD_OFFSET + 27, "S": DISCARD_OFFSET + 28,
+    "W": DISCARD_OFFSET + 29, "N": DISCARD_OFFSET + 30,
+    "P": DISCARD_OFFSET + 31, "F": DISCARD_OFFSET + 32,
+    "C": DISCARD_OFFSET + 33,
+    # 赤宝牌（Rinshan 格式 "0x"）
     "0m": DISCARD_OFFSET + 34,
     "0p": DISCARD_OFFSET + 35,
     "0s": DISCARD_OFFSET + 36,
+    # 赤宝牌（libriichi 格式 "5xr"）
+    "5mr": DISCARD_OFFSET + 34,
+    "5pr": DISCARD_OFFSET + 35,
+    "5sr": DISCARD_OFFSET + 36,
 }
 
 
@@ -112,9 +124,181 @@ def _replace_discard_candidates_with_valid_discards(candidates: list[int], pendi
 # PlayerState 包装器
 # ─────────────────────────────────────────────────────────────────────────────
 
-# libriichi start_kyoku 要求 bakaze/jikaze 使用 "E"/"S"/"W"/"N"，
-# 而 Rinshan 内部用 mjai 牌记法 "1z"~"4z"，需在喂入前转换。
-_WIND_TILE_TO_STR: dict[str, str] = {"1z": "E", "2z": "S", "3z": "W", "4z": "N"}
+# Rust libriichi tile_id(0-33) -> LR 格式字符串（与 MJAI_PAI_STRINGS 顺序一致）
+_LR_PAI_STRINGS: list[str] = [
+    "1m","2m","3m","4m","5m","6m","7m","8m","9m",
+    "1p","2p","3p","4p","5p","6p","7p","8p","9p",
+    "1s","2s","3s","4s","5s","6s","7s","8s","9s",
+    "E","S","W","N","P","F","C",
+]
+# tile_id(deaka) -> 赤宝牌 LR 格式
+_AKA_BY_TILE_ID: dict[int, str] = {4: "5mr", 13: "5pr", 22: "5sr"}
+# akas_in_hand 下标
+_AKA_IDX: dict[int, int] = {4: 0, 13: 1, 22: 2}
+#
+# libriichi PlayerState.update() 不接受以下 Rinshan/mjai 格式，喂入前必须转换：
+#   1. 风牌/三元牌："1z"~"7z" → "E"/"S"/"W"/"N"/"P"/"F"/"C"
+#   2. 赤宝牌：    "0m"/"0p"/"0s" → "5mr"/"5pr"/"5sr"
+#
+# 同一张表覆盖 bakaze/jikaze 字段（风向字符串）和所有 pai 牌字段。
+_TILE_RINSHAN_TO_LR: dict[str, str] = {
+    # 风牌
+    "1z": "E", "2z": "S", "3z": "W", "4z": "N",
+    # 三元牌
+    "5z": "P", "6z": "F", "7z": "C",
+    # 赤宝牌
+    "0m": "5mr", "0p": "5pr", "0s": "5sr",
+}
+# 向后兼容：_WIND_TILE_TO_STR 仍被 feed() 中 bakaze/jikaze 分支引用
+_WIND_TILE_TO_STR: dict[str, str] = {k: v for k, v in _TILE_RINSHAN_TO_LR.items()
+                                     if k in ("1z", "2z", "3z", "4z")}
+
+# libriichi → Rinshan：last_self_tsumo() 等接口返回值转回 Tile 构造参数
+# 字牌直接走 Tile.from_mjai() 无法识别 libriichi 格式，需要此映射。
+_TILE_LR_TO_RINSHAN: dict[str, tuple[int, bool]] = {
+    # 赤宝牌
+    "5mr": (4,  True),
+    "5pr": (13, True),
+    "5sr": (22, True),
+    # 风牌
+    "E": (27, False), "S": (28, False), "W": (29, False), "N": (30, False),
+    # 三元牌
+    "P": (31, False), "F": (32, False), "C": (33, False),
+}
+# 向后兼容别名
+_AKA_RINSHAN_TO_LR = _TILE_RINSHAN_TO_LR
+_AKA_LR_TO_RINSHAN = _TILE_LR_TO_RINSHAN
+
+
+def _lr_tile_to_rinshan_args(lr_pai: str) -> tuple[int, bool]:
+    """把 libriichi 牌字符串（含赤宝牌 5xr、字牌 E/S/W/N/P/F/C 格式）转为 Rinshan Tile 构造参数。"""
+    if lr_pai in _TILE_LR_TO_RINSHAN:
+        return _TILE_LR_TO_RINSHAN[lr_pai]
+    t = Tile.from_mjai(lr_pai)  # 普通数牌，Rinshan 认识
+    return t.tile_id, t.is_aka
+
+
+def _convert_pai_fields_for_lr(ev: dict) -> dict:
+    """
+    把事件 dict 中所有牌字段从 Rinshan 记法转为 libriichi 记法。
+    只在有需要转换的牌时才拷贝 dict（热路径优化）。
+
+    覆盖的转换：
+      字牌  "1z"~"7z" → "E"/"S"/"W"/"N"/"P"/"F"/"C"
+      赤宝牌 "0m"/"0p"/"0s" → "5mr"/"5pr"/"5sr"
+
+    处理的字段：
+      pai, dora_marker, consumed（列表）, tehais（二维列表，start_kyoku 专用）
+    """
+    _CVT = _TILE_RINSHAN_TO_LR
+
+    def _cvt(s: str) -> str:
+        return _CVT.get(s, s)
+
+    def _cvt_list(lst: list) -> list:
+        return [_CVT.get(x, x) for x in lst]
+
+    needs_copy = False
+    for field in ("pai", "dora_marker"):
+        if ev.get(field) in _CVT:
+            needs_copy = True
+            break
+    if not needs_copy:
+        if any(x in _CVT for x in ev.get("consumed", [])):
+            needs_copy = True
+    if not needs_copy and ev.get("type") == "start_kyoku":
+        for hand in ev.get("tehais", []):
+            if any(x in _CVT for x in hand):
+                needs_copy = True
+                break
+
+    if not needs_copy:
+        return ev
+
+    ev = dict(ev)  # 浅拷贝
+    if "pai" in ev:
+        ev["pai"] = _cvt(ev["pai"])
+    if "dora_marker" in ev:
+        ev["dora_marker"] = _cvt(ev["dora_marker"])
+    if "consumed" in ev:
+        ev["consumed"] = _cvt_list(ev["consumed"])
+    if ev.get("type") == "start_kyoku" and "tehais" in ev:
+        ev["tehais"] = [_cvt_list(hand) for hand in ev["tehais"]]
+    return ev
+
+
+def _fix_naki_consumed(resp: dict, ps) -> dict:
+    """
+    将 chi/pon/daiminkan 的 consumed 字段规范化为 libriichi 格式。
+
+    设计原则：
+    - consumed 的 tile_id 由 Rust pending.can_chi/pon 保证合法（Rust 已验证手牌存在）
+    - 赤宝牌处理：始终使用普通牌格式（不用 5xr），Rust validate_reaction 只检查 deaka 后
+      的 tehai[tid]>0，普通牌格式永远安全。
+      （tracker.akas_in_hand 可能与 Rust 不同步，用赤宝牌有误报风险）
+    - 字牌格式从 Rinshan "xz" 转换为 LR "E/S/W/N/P/F/C"
+    """
+    rtype = resp.get("type")
+    if rtype not in ("chi", "pon", "daiminkan"):
+        return resp
+
+    def _safe_str(tid: int) -> str:
+        """返回 tid 对应的普通牌 LR 格式字符串（非赤宝牌）。"""
+        return _LR_PAI_STRINGS[tid] if tid < 34 else "?"
+
+    # ── 获取 pai 的 tile_id ──────────────────────────────
+    pai_raw = resp.get("pai", "")
+    pai_lr  = _TILE_RINSHAN_TO_LR.get(pai_raw, pai_raw)
+    if pai_lr in _TILE_LR_TO_RINSHAN:
+        pai_tid, _ = _TILE_LR_TO_RINSHAN[pai_lr]
+    else:
+        try:
+            from rinshan.tile import Tile as _T
+            pai_tid = _T.from_mjai(pai_lr).tile_id
+        except Exception:
+            return resp
+
+    if rtype in ("pon", "daiminkan"):
+        n_consumed = 2 if rtype == "pon" else 3
+        new_consumed = [_safe_str(pai_tid)] * n_consumed
+        if new_consumed != resp.get("consumed"):
+            resp = dict(resp)
+            resp["consumed"] = new_consumed
+        return resp
+
+    # chi: 将 consumed 各牌转为 LR 普通牌格式
+    consumed_raw = resp.get("consumed", [])
+    if len(consumed_raw) != 2:
+        return resp
+
+    new_consumed = []
+    changed = False
+    for c_raw in consumed_raw:
+        c_lr = _TILE_RINSHAN_TO_LR.get(c_raw, c_raw)
+        if c_lr in _TILE_LR_TO_RINSHAN:
+            tid, _ = _TILE_LR_TO_RINSHAN[c_lr]
+        else:
+            try:
+                from rinshan.tile import Tile as _T
+                tid = _T.from_mjai(c_lr).tile_id
+            except Exception:
+                new_consumed.append(c_raw)
+                continue
+        new_c = _safe_str(tid)
+        if new_c != c_raw:
+            changed = True
+        new_consumed.append(new_c)
+
+    if changed:
+        resp = dict(resp)
+        resp["consumed"] = new_consumed
+    return resp
+
+    if new_consumed != list(consumed_raw):
+        resp = dict(resp)
+        resp["consumed"] = new_consumed
+    return resp
+
 
 # 喂给 libriichi 时需过滤掉的 Rinshan 私有字段
 _LR_PRIV_KEYS: frozenset[str] = frozenset({
@@ -167,6 +351,8 @@ class _LRStateTracker:
                         ev_clean["bakaze"] = bk
                     if jk:
                         ev_clean["jikaze"] = jk
+            # 赤宝牌格式转换："0x" → "5xr"（libriichi 不接受 "0x" 格式）
+            ev_clean = _convert_pai_fields_for_lr(ev_clean)
             try:
                 self._ps.update(json.dumps(ev_clean))
             except Exception as exc:
@@ -200,7 +386,7 @@ class _LRStateTracker:
             return [False] * 34
         return list(self._ps.waits)
 
-    def build_candidates(self, pending: dict) -> list[int]:
+    def build_candidates(self, pending: dict, player_events: list | None = None) -> list[int]:
         """
         从 libriichi.ActionCandidate 构建 Rinshan token 候选列表。
 
@@ -240,14 +426,63 @@ class _LRStateTracker:
                 candidates.append(TSUMO_AGARI_TOKEN)
 
             # ── 暗杠 ──────────────────────────────────
-            if cans.can_ankan:
-                for tile_id in self._ps.ankan_candidates:
-                    candidates.append(ANKAN_OFFSET + int(tile_id))
+            # ── 暗杠 ──────────────────────────────────
+            # 优先使用 Rust pending.ankan_candidates（最权威，Rust 直接下发的合法牌列表）。
+            # 若 pending 里有此字段（新版 Rust），直接用；否则退回 player_events 扫描。
+            if pending.get("can_ankan", cans.can_ankan):
+                ankan_from_pending: list = pending.get("ankan_candidates", [])
+                if ankan_from_pending:
+                    # pending 里的牌名是 Rinshan 格式（如 "3m", "0p"）
+                    for pai_str in ankan_from_pending:
+                        try:
+                            t = Tile.from_mjai(pai_str)
+                            candidates.append(ANKAN_OFFSET + t.tile_id)
+                        except Exception:
+                            pass
+                else:
+                    # 退回：从 player_events 末尾反向扫描 last_tsumo
+                    ankan_tid_from_events: int | None = None
+                    if player_events:
+                        seat_id = self.seat
+                        for ev in reversed(player_events):
+                            if ev.get("type") == "tsumo" and ev.get("actor") == seat_id:
+                                raw = ev.get("pai", "")
+                                if raw and raw != "?":
+                                    lr = _TILE_RINSHAN_TO_LR.get(raw, raw)
+                                    if lr in _TILE_LR_TO_RINSHAN:
+                                        ankan_tid_from_events, _ = _TILE_LR_TO_RINSHAN[lr]
+                                    else:
+                                        try:
+                                            ankan_tid_from_events, _ = _lr_tile_to_rinshan_args(lr)
+                                        except Exception:
+                                            pass
+                                break
+                            elif ev.get("type") in ("dahai", "chi", "pon", "daiminkan",
+                                                    "kakan", "ankan", "reach"):
+                                if ev.get("actor") == seat_id:
+                                    break
+                    if ankan_tid_from_events is not None:
+                        candidates.append(ANKAN_OFFSET + ankan_tid_from_events)
+                    else:
+                        for pai_str in self._ps.ankan_candidates():
+                            tid, _ = _lr_tile_to_rinshan_args(pai_str)
+                            candidates.append(ANKAN_OFFSET + tid)
 
             # ── 加杠 ──────────────────────────────────
-            if cans.can_kakan:
-                for tile_id in self._ps.kakan_candidates:
-                    candidates.append(KAKAN_OFFSET + int(tile_id))
+            # 同样优先使用 Rust pending.kakan_candidates
+            if pending.get("can_kakan", cans.can_kakan):
+                kakan_from_pending: list = pending.get("kakan_candidates", [])
+                if kakan_from_pending:
+                    for pai_str in kakan_from_pending:
+                        try:
+                            t = Tile.from_mjai(pai_str)
+                            candidates.append(KAKAN_OFFSET + t.tile_id)
+                        except Exception:
+                            pass
+                else:
+                    for pai_str in self._ps.kakan_candidates():
+                        tid, _ = _lr_tile_to_rinshan_args(pai_str)
+                        candidates.append(KAKAN_OFFSET + tid)
 
             # ── 九种九牌 ──────────────────────────────
             if cans.can_ryukyoku:
@@ -255,55 +490,61 @@ class _LRStateTracker:
                 candidates.append(RYUKYOKU_TOKEN)
 
         elif ptype == "naki_or_pass":
+            # naki_or_pass: Rust pending 是动作合法性的权威来源。
+            # 直接使用 pending 里的 can_* 字段（而非 tracker.last_cans），
+            # 避免 tracker 与 Rust 实际状态不同步导致非法动作。
+            discard_tile_str = pending.get("tile", "")
+            # tile 可能是 libriichi 格式（E/S/W/N/P/F/C 或 5xr）
+            discard_tile_str_rinshan = {v: k for k, v in _TILE_RINSHAN_TO_LR.items()}.get(
+                discard_tile_str, discard_tile_str
+            )
+
             # ── 荣和 ──────────────────────────────────
-            if cans.can_ron_agari:
+            if pending.get("can_ron", cans.can_ron_agari):
                 candidates.append(RON_AGARI_TOKEN)
 
             # ── 碰 ────────────────────────────────────
-            if cans.can_pon:
-                discard_tile_str = pending.get("tile", "")
+            if pending.get("can_pon", False):
                 if discard_tile_str:
                     try:
-                        t = Tile.from_mjai(discard_tile_str)
+                        t = Tile.from_mjai(discard_tile_str_rinshan)
                         candidates.append(PON_OFFSET + t.tile_id)
                     except Exception:
                         pass
 
             # ── 吃 ────────────────────────────────────
-            if cans.can_chi:
-                discard_tile_str = pending.get("tile", "")
-                if discard_tile_str:
-                    try:
-                        t = Tile.from_mjai(discard_tile_str)
-                        suit = t.tile_id // 9
-                        num  = t.tile_id % 9 + 1  # 1-based
-                        tehai = self._ps.tehai
-                        # 三种吃型：低(12x)/中(1x3)/高(x23)
-                        # 吃型 form: 0=低(被吃牌最高), 1=中, 2=高(被吃牌最低)
-                        if cans.can_chi_low and num >= 3:
-                            low = num - 2
-                            if (suit * 9 + low - 1) < 34 and (suit * 9 + low) < 34:
-                                if tehai[suit * 9 + low - 1] > 0 and tehai[suit * 9 + low] > 0:
-                                    candidates.append(CHI_OFFSET + chi_type_to_idx(suit, low, 2))
-                        if cans.can_chi_mid and 2 <= num <= 8:
-                            low = num - 1
-                            if (suit * 9 + low - 1) < 34 and (suit * 9 + low + 1) < 34:
-                                if tehai[suit * 9 + low - 1] > 0 and tehai[suit * 9 + low + 1] > 0:
-                                    candidates.append(CHI_OFFSET + chi_type_to_idx(suit, low, 1))
-                        if cans.can_chi_high and num <= 7:
-                            low = num
-                            if (suit * 9 + low) < 34 and (suit * 9 + low + 1) < 34:
-                                if tehai[suit * 9 + low] > 0 and tehai[suit * 9 + low + 1] > 0:
-                                    candidates.append(CHI_OFFSET + chi_type_to_idx(suit, low, 0))
-                    except Exception:
-                        pass
+            can_chi_low  = pending.get("can_chi_low",  False)
+            can_chi_mid  = pending.get("can_chi_mid",  False)
+            can_chi_high = pending.get("can_chi_high", False)
+            if (can_chi_low or can_chi_mid or can_chi_high) and discard_tile_str:
+                try:
+                    t = Tile.from_mjai(discard_tile_str_rinshan)
+                    suit = t.tile_id // 9
+                    num  = t.tile_id % 9 + 1  # 1-based
+                    # Rust update.rs set_can_chi_from_tile 정의:
+                    # can_chi_low:  tehai[tile+1]>0 && tehai[tile+2]>0  → consumed=[tile+1, tile+2]
+                    # can_chi_mid:  tehai[tile-1]>0 && tehai[tile+1]>0  → consumed=[tile-1, tile+1]
+                    # can_chi_high: tehai[tile-2]>0 && tehai[tile-1]>0  → consumed=[tile-2, tile-1]
+                    # form=0: 吃対象=low+2 → consumed=[low,low+1]
+                    # form=1: 吃対象=low+1 → consumed=[low,low+2]
+                    # form=2: 吃対象=low   → consumed=[low+1,low+2]
+                    if can_chi_low and num <= 7:   # consumed=[tile+1, tile+2], 吃対象=tile=low
+                        low = num                  # low=tile_num, form=2
+                        candidates.append(CHI_OFFSET + chi_type_to_idx(suit, low, 2))
+                    if can_chi_mid and 2 <= num <= 8:  # consumed=[tile-1, tile+1], 吃対象=tile=low+1
+                        low = num - 1                  # low=tile_num-1, form=1
+                        candidates.append(CHI_OFFSET + chi_type_to_idx(suit, low, 1))
+                    if can_chi_high and num >= 3:  # consumed=[tile-2, tile-1], 吃対象=tile=low+2
+                        low = num - 2              # low=tile_num-2, form=0
+                        candidates.append(CHI_OFFSET + chi_type_to_idx(suit, low, 0))
+                except Exception:
+                    pass
 
             # ── 大明杠 ────────────────────────────────
-            if cans.can_daiminkan:
-                discard_tile_str = pending.get("tile", "")
+            if pending.get("can_daiminkan", False):
                 if discard_tile_str:
                     try:
-                        t = Tile.from_mjai(discard_tile_str)
+                        t = Tile.from_mjai(discard_tile_str_rinshan)
                         candidates.append(DAIMINKAN_OFFSET + t.tile_id)
                     except Exception:
                         pass
@@ -398,6 +639,7 @@ class LibriichiBoostedAgent(RinshanAgent):
         batch_pending:    list[dict]      = []
         batch_seats:      list[int]       = []
         batch_states:     list            = []
+        batch_trackers:   list            = []  # 为 ankan consumed 修正保留 tracker
 
         for i, (seat, player_events, pending) in enumerate(requests):
             game_key = str(pending.get("_game_key", "default"))
@@ -407,8 +649,32 @@ class LibriichiBoostedAgent(RinshanAgent):
 
             # ── 候选生成（Rust）──────────────────────────────
             tracker = self._get_lr_tracker(seat, game_key, player_events)
-            candidates = tracker.build_candidates(pending)
+            candidates = tracker.build_candidates(pending, player_events)
             ptype = str(pending.get("type", ""))
+
+            # ── 注入 Rust 权威 last_self_tsumo，供 _token_to_mjai 判断 tsumogiri ──
+            # 不依赖 tracker.ps（parallel_games>1 时 tracker 与 Rust 实际状态可能错位），
+            # 直接反向扫描本轮 Rust 传入的 player_events 末尾找最后一次该 seat 的摸牌事件。
+            # 这是最可靠的方式：player_events 由 Rust 本轮下发，末尾就是当前局面。
+            if ptype == "turn_action":
+                last_tsumo_pai: str | None = None
+                for ev in reversed(player_events):
+                    if ev.get("type") == "tsumo" and ev.get("actor") == seat:
+                        raw_pai = ev.get("pai", "")
+                        if raw_pai and raw_pai != "?":
+                            # 转成 libriichi 格式（字牌/赤宝牌可能是 Rinshan 格式 1z/0s）
+                            last_tsumo_pai = _TILE_RINSHAN_TO_LR.get(raw_pai, raw_pai)
+                        break
+                    elif ev.get("type") in ("dahai", "chi", "pon", "daiminkan",
+                                            "kakan", "ankan", "reach"):
+                        # 到了弃牌/副露/立直就说明摸牌已被消耗
+                        if ev.get("actor") == seat:
+                            break
+                # 始终注入（包括 None），让 _token_to_mjai 统一走 rust 路径：
+                # - last_tsumo_pai is not None → 正常 tsumogiri 判断
+                # - last_tsumo_pai is None     → 强制 tsumogiri=False（吃/碰/杠/立直后无摸牌）
+                pending = dict(pending)  # 浅拷贝，避免修改原始 pending
+                pending["_rust_last_tsumo"] = last_tsumo_pai
 
             # turn_action 下 Rust pending 是动作合法性的权威来源。
             # libriichi 的 PlayerState.last_cans 已经很准，但这里仍用 pending
@@ -531,6 +797,7 @@ class LibriichiBoostedAgent(RinshanAgent):
             batch_pending.append(pending)
             batch_seats.append(seat)
             batch_states.append(state)
+            batch_trackers.append(tracker)
 
         # ── 批量推理 ──────────────────────────────────────────
         if batch_encoded:
@@ -564,6 +831,17 @@ class LibriichiBoostedAgent(RinshanAgent):
                     q_values=q_values[local_i],
                     candidates=candidates,
                 )
+                # 模型选了 ankan：consumed 直接从 token 计算，不依赖 tracker
+                # Rust build_candidates 里 can_ankan=true 已保证手牌有 4 张，
+                # 与 chi/pon 相同原则：不用赤宝牌格式，只发普通牌，Rust 保证 deaka 合法
+                if responses[orig_i].get("type") == "ankan":
+                    tid = chosen_token - ANKAN_OFFSET   # deaka tile_id (0-33)
+                    plain = _LR_PAI_STRINGS[tid] if tid < 34 else "?"
+                    responses[orig_i] = {
+                        "type": "ankan",
+                        "actor": batch_seats[local_i],
+                        "consumed": [plain] * 4,
+                    }
                 # 如果模型选了 reach，记录该座位需要一次强制弃牌
                 if responses[orig_i].get("type") == "reach":
                     _gk = str(batch_pending[local_i].get("_game_key", "default"))
@@ -583,10 +861,24 @@ class LibriichiBoostedAgent(RinshanAgent):
                             "candidates": candidates,
                         }, ensure_ascii=False) + "\n")
 
-        return [
-            r if r is not None else {"type": "pass", "actor": requests[i][0]}
-            for i, r in enumerate(responses)
-        ]
+        # ── 统一转换响应中的 pai 字段为 libriichi 格式 ──────────────────────
+        # Rust libriichi 不接受 Rinshan/mjai 的 "0x"（赤宝牌）和 "xz"（字牌）格式，
+        # 必须转换为 "5xr" 和 "E/S/W/N/P/F/C" 格式才能通过 Rust 校验。
+        # 同时用 Rust PlayerState.tehai 修正 chi/pon/daiminkan 的 consumed 字段，
+        # 避免 Python state 漂移导致手牌中不存在的牌出现在 consumed 里。
+        final = []
+        for i, r in enumerate(responses):
+            if r is None:
+                r = {"type": "pass", "actor": requests[i][0]}
+            # 修正 chi/pon/daiminkan consumed（用 Rust 权威手牌）
+            if r.get("type") in ("chi", "pon", "daiminkan"):
+                seat_i, player_events_i, pending_i = requests[i]
+                game_key_i = str(pending_i.get("_game_key", "default"))
+                tr_i = self._get_lr_tracker(seat_i, game_key_i, player_events_i)
+                if tr_i.ps is not None:
+                    r = _fix_naki_consumed(r, tr_i.ps)
+            final.append(_convert_pai_fields_for_lr(r))
+        return final
 
 
 # ─────────────────────────────────────────────────────────────────────────────

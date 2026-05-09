@@ -197,10 +197,11 @@ impl BoardState {
     }
 
     #[inline]
-    fn broadcast(&mut self, ev: &Event) {
+    fn broadcast(&mut self, ev: &Event) -> Result<()> {
         for s in &mut self.player_states {
-            s.update(ev).expect("fatal internal bug in BoardState");
+            s.update(ev)?;
         }
+        Ok(())
     }
 
     fn haipai(&mut self) -> Result<()> {
@@ -219,7 +220,7 @@ impl BoardState {
             scores: self.board.scores,
             tehais: self.board.haipai,
         };
-        self.broadcast(&start_kyoku);
+        self.broadcast(&start_kyoku)?;
         self.add_log_no_meta(start_kyoku);
 
         let tile = self
@@ -232,7 +233,7 @@ impl BoardState {
             actor: self.oya,
             pai: tile,
         };
-        self.broadcast(&first_tsumo);
+        self.broadcast(&first_tsumo)?;
         self.add_log_no_meta(first_tsumo);
 
         Ok(())
@@ -339,15 +340,16 @@ impl BoardState {
         Ok(false)
     }
 
-    fn check_riichi_accepted(&mut self) {
+    fn check_riichi_accepted(&mut self) -> Result<()> {
         if let Some(actor) = self.riichi_to_be_accepted.take() {
             let riichi_accepted = Event::ReachAccepted { actor };
-            self.broadcast(&riichi_accepted);
+            self.broadcast(&riichi_accepted)?;
             self.add_log_no_meta(riichi_accepted);
             self.board.scores[actor as usize] -= 1000;
             self.board.kyotaku += 1;
             self.accepted_riichis += 1;
         }
+        Ok(())
     }
 
     fn add_new_dora(&mut self) -> Result<()> {
@@ -357,7 +359,7 @@ impl BoardState {
             .pop()
             .context("illegal kan: already 4 kans and this is the 5th")?;
         let dora_ev = Event::Dora { dora_marker: dora };
-        self.broadcast(&dora_ev);
+        self.broadcast(&dora_ev)?;
         self.add_log_no_meta(dora_ev);
 
         Ok(())
@@ -568,7 +570,7 @@ impl BoardState {
                     self.exhaustive_ryukyoku();
                     return Ok(Poll::End);
                 }
-                self.check_riichi_accepted();
+                self.check_riichi_accepted()?;
 
                 let tile = if self.deal_from_rinshan.take().is_some() {
                     self.board
@@ -592,7 +594,7 @@ impl BoardState {
                     self.add_new_dora()?;
                 }
 
-                self.broadcast(&tsumo);
+                self.broadcast(&tsumo)?;
                 self.add_log_no_meta(tsumo);
             }
 
@@ -601,7 +603,7 @@ impl BoardState {
                     self.add_new_dora()?;
                 }
 
-                self.broadcast(&ev.event);
+                self.broadcast(&ev.event)?;
                 self.add_log(ev.clone());
                 self.tsumo_actor = (actor + 1) % 4;
 
@@ -617,9 +619,20 @@ impl BoardState {
                 }
             }
 
-            Event::Chi { .. } | Event::Pon { .. } => {
-                self.check_riichi_accepted();
-                self.broadcast(&ev.event);
+            Event::Chi { actor, .. } | Event::Pon { actor, .. } => {
+                // Pre-check fuuro capacity across all 4 PlayerStates to give a
+                // clean error before broadcast() touches any of them.
+                for ps in &self.player_states {
+                    let actor_rel = ((actor as usize).wrapping_sub(ps.player_id() as usize) + 4) % 4;
+                    if ps.fuuro_overview_len(actor_rel) >= 4 {
+                        bail!(
+                            "rule violation: fuuro overflow (already {} fuuro sets)",
+                            ps.fuuro_overview_len(actor_rel)
+                        );
+                    }
+                }
+                self.check_riichi_accepted()?;
+                self.broadcast(&ev.event)?;
                 self.add_log(ev.clone());
             }
 
@@ -629,7 +642,7 @@ impl BoardState {
                     self.add_new_dora()?;
                 }
 
-                self.broadcast(&ev.event);
+                self.broadcast(&ev.event)?;
                 self.add_log(ev.clone());
 
                 // Immediately add new dora
@@ -647,9 +660,9 @@ impl BoardState {
                 }
 
                 // For Daiminkan only
-                self.check_riichi_accepted();
+                self.check_riichi_accepted()?;
 
-                self.broadcast(&ev.event);
+                self.broadcast(&ev.event)?;
                 self.add_log(ev.clone());
 
                 self.need_new_dora_at_discard = Some(());
@@ -660,7 +673,7 @@ impl BoardState {
             }
 
             Event::Reach { actor } => {
-                self.broadcast(&ev.event);
+                self.broadcast(&ev.event)?;
                 self.add_log(ev.clone());
                 self.riichi_to_be_accepted = Some(actor);
             }

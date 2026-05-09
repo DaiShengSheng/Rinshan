@@ -139,6 +139,11 @@ impl PlayerState {
             } => {
                 ensure!((target + 1) % 4 == actor, "chi from non-kamicha");
                 ensure!(
+                    self.fuuro_overview[0].len() < self.fuuro_overview[0].capacity(),
+                    "rule violation: fuuro overflow (already {} fuuro sets)",
+                    self.fuuro_overview[0].len()
+                );
+                ensure!(
                     matches!(self.last_kawa_tile, Some(tile) if tile == pai),
                     "chi target is not the last kawa tile",
                 );
@@ -162,6 +167,11 @@ impl PlayerState {
                     "pon target is not the last kawa tile",
                 );
                 ensure!(cans.can_pon, "cannot pon");
+                ensure!(
+                    self.fuuro_overview[0].len() < self.fuuro_overview[0].capacity(),
+                    "rule violation: fuuro overflow (already {} fuuro sets)",
+                    self.fuuro_overview[0].len()
+                );
                 self.ensure_tiles_in_hand(&consumed)?;
             }
 
@@ -177,6 +187,11 @@ impl PlayerState {
                     "daiminkan target is not the last kawa tile",
                 );
                 ensure!(cans.can_daiminkan, "cannot daiminkan");
+                ensure!(
+                    self.fuuro_overview[0].len() < self.fuuro_overview[0].capacity(),
+                    "rule violation: fuuro overflow (already {} fuuro sets)",
+                    self.fuuro_overview[0].len()
+                );
                 self.ensure_tiles_in_hand(&consumed)?;
             }
             Event::Kakan { pai, .. } => {

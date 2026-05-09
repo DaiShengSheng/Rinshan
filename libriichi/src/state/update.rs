@@ -417,11 +417,16 @@ impl PlayerState {
         }
 
         if actor_rel == 3 && !pai.is_jihai() && self.tehai_len_div3 > 0 {
-            self.set_can_chi_from_tile(pai);
+            // Only allow chi/pon/daiminkan when fuuro capacity is not yet full
+            if self.fuuro_overview[0].len() < self.fuuro_overview[0].capacity() {
+                self.set_can_chi_from_tile(pai);
+            }
         }
-        self.last_cans.can_pon = self.tehai[pai.deaka().as_usize()] >= 2;
-        self.last_cans.can_daiminkan =
-            self.kans_on_board < 4 && self.tehai[pai.deaka().as_usize()] == 3;
+        if self.fuuro_overview[0].len() < self.fuuro_overview[0].capacity() {
+            self.last_cans.can_pon = self.tehai[pai.deaka().as_usize()] >= 2;
+            self.last_cans.can_daiminkan =
+                self.kans_on_board < 4 && self.tehai[pai.deaka().as_usize()] == 3;
+        }
 
         Ok(())
     }
@@ -429,6 +434,11 @@ impl PlayerState {
     fn chi(&mut self, actor: u8, pai: Tile, consumed: [Tile; 2]) -> Result<()> {
         let actor_rel = self.rel(actor);
         let full_set = consumed.into_iter().chain(iter::once(pai)).collect();
+        ensure!(
+            self.fuuro_overview[actor_rel].len() < self.fuuro_overview[actor_rel].capacity(),
+            "rule violation: fuuro overflow (already {} fuuro sets)",
+            self.fuuro_overview[actor_rel].len()
+        );
         self.fuuro_overview[actor_rel].push(full_set);
         self.intermediate_chi_pon = Some(ChiPon {
             consumed,
@@ -497,6 +507,11 @@ impl PlayerState {
     fn pon(&mut self, actor: u8, target: u8, pai: Tile, consumed: [Tile; 2]) -> Result<()> {
         let actor_rel = self.rel(actor);
         let full_set = consumed.into_iter().chain(iter::once(pai)).collect();
+        ensure!(
+            self.fuuro_overview[actor_rel].len() < self.fuuro_overview[actor_rel].capacity(),
+            "rule violation: fuuro overflow (already {} fuuro sets)",
+            self.fuuro_overview[actor_rel].len()
+        );
         self.fuuro_overview[actor_rel].push(full_set);
         self.intermediate_chi_pon = Some(ChiPon {
             consumed,
@@ -544,6 +559,11 @@ impl PlayerState {
     fn daiminkan(&mut self, actor: u8, target: u8, pai: Tile, consumed: [Tile; 3]) -> Result<()> {
         let actor_rel = self.rel(actor);
         let full_set = consumed.into_iter().chain(iter::once(pai)).collect();
+        ensure!(
+            self.fuuro_overview[actor_rel].len() < self.fuuro_overview[actor_rel].capacity(),
+            "rule violation: fuuro overflow (already {} fuuro sets)",
+            self.fuuro_overview[actor_rel].len()
+        );
         self.fuuro_overview[actor_rel].push(full_set);
         self.intermediate_kan.push(pai);
         self.pad_kawa_for_pon_or_daiminkan(actor, target);

@@ -168,6 +168,13 @@ impl PlayerState {
 
     /// For debug only.
     ///
+    /// Return the number of fuuro sets for a given relative actor (0=self).
+    #[inline]
+    #[must_use]
+    pub(crate) fn fuuro_overview_len(&self, actor_rel: usize) -> usize {
+        self.fuuro_overview[actor_rel].len()
+    }
+
     /// Return a human readable description of the current state.
     #[must_use]
     pub fn brief_info(&self) -> String {

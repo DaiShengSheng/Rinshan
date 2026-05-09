@@ -1331,10 +1331,28 @@ def _token_to_mjai(token: int, seat: int, state, pending: dict,
             if _hand:
                 return {"type": "dahai", "actor": seat,
                         "pai": _hand[0].to_mjai(), "tsumogiri": False}
-        last = state.last_draw if state is not None else None
-        tsumogiri = (last is not None and
-                     last.tile_id == tile.tile_id and
-                     last.is_aka == tile.is_aka)
+        # tsumogiri 判断：优先使用 Rust PlayerState 的 last_self_tsumo（注入到
+        # pending["_rust_last_tsumo"]），避免 Python state 漂移导致错误的 tsumogiri=True。
+        rust_last_tsumo = pending.get("_rust_last_tsumo") if pending is not None else None
+        if "_rust_last_tsumo" in (pending or {}):
+            # LibriichiBoostedAgent 已注入此字段（包括 None 值）：
+            # - not None → 正常比对 tile 是否是刚摸到的那张
+            # - None     → 吃/碰/杠/立直后没有摸牌，强制 tsumogiri=False
+            if rust_last_tsumo is not None:
+                try:
+                    from rinshan.self_play.libriichi_agent import _lr_tile_to_rinshan_args
+                    rust_tid, rust_aka = _lr_tile_to_rinshan_args(rust_last_tsumo)
+                    tsumogiri = (rust_tid == tile.tile_id and rust_aka == tile.is_aka)
+                except Exception:
+                    tsumogiri = False
+            else:
+                tsumogiri = False  # 无摸牌，不可摸切
+        else:
+            # RinshanAgent 等其他 agent 的旧路径（依赖 Python state）
+            last = state.last_draw if state is not None else None
+            tsumogiri = (last is not None and
+                         last.tile_id == tile.tile_id and
+                         last.is_aka == tile.is_aka)
         return {"type": "dahai", "actor": seat,
                 "pai": tile.to_mjai(), "tsumogiri": tsumogiri}
 
@@ -1342,15 +1360,30 @@ def _token_to_mjai(token: int, seat: int, state, pending: dict,
     if CHI_OFFSET <= token < CHI_OFFSET + 90:
         chi_idx = token - CHI_OFFSET
         suit, low_num, form = idx_to_chi_type(chi_idx)
-        pai_str = pending.get("tile", "1m")
-        pai = Tile.from_mjai(pai_str)
-        hand = state.hands[seat]
-        consumed = _find_chi_consumed(hand, suit, low_num, form, pai)
+        # pai_str 可能是 libriichi 格式（如 "5sr"）
+        pai_str_raw = pending.get("tile", "1m")
+        # 根据 form 值计算 consumed 的 tile_id（不依赖 Python state.hands）
+        # form=0: 吃对象=low+2，consumed=[low, low+1]
+        # form=1: 吃对象=low+1，consumed=[low, low+2]
+        # form=2: 吃对象=low,   consumed=[low+1, low+2]
+        base = suit * 9 + low_num - 1  # low 牌的 tile_id（0-based）
+        if form == 0:
+            tid_a, tid_b = base, base + 1
+        elif form == 1:
+            tid_a, tid_b = base, base + 2
+        else:  # form == 2
+            tid_a, tid_b = base + 1, base + 2
+        _suits = ("m", "p", "s")
+        def _tid_lr(tid: int) -> str:
+            s, n = divmod(tid, 9)
+            return f"{n+1}{_suits[s]}"
+        str_a = _tid_lr(tid_a) if 0 <= tid_a < 27 else "?"
+        str_b = _tid_lr(tid_b) if 0 <= tid_b < 27 else "?"
         return {
             "type": "chi", "actor": seat,
-            "target": pending.get("discarder", 0),  # Rust: target not discarder
-            "pai": pai_str,
-            "consumed": [t.to_mjai() for t in consumed],
+            "target": pending.get("discarder", 0),
+            "pai": pai_str_raw,
+            "consumed": [str_a, str_b],
         }
     # 碰
     if PON_OFFSET <= token < PON_OFFSET + NUM_TILE_TYPES:
