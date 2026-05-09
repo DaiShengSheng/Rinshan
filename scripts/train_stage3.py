@@ -243,23 +243,23 @@ def main():
         trainer.model.load_state_dict(s2_ckpt["model"], strict=False)
         trainer.target_model.load_state_dict(s2_ckpt["model"], strict=False)
         logger.info("Target network initialized with Stage 2 weights (strict=False)")
-        # RIICHI embedding 冷启动初始化（Stage 1/2 未训练过 RIICHI 候选）
-        if cfg.get("reinit_riichi_embed", True):
-            _init_riichi_embed(trainer.model, device=str(device))
-            _init_riichi_embed(trainer.target_model, device=str(device))
     elif stage1_ckpt and Path(stage1_ckpt).exists():
         logger.info(f"Loading Stage 1 weights from {stage1_ckpt}")
         s1_ckpt = torch.load(stage1_ckpt, map_location=device, weights_only=True)
         trainer.model.load_state_dict(s1_ckpt["model"], strict=False)
-        # 目标网络也初始化为相同权重
         trainer.target_model.load_state_dict(s1_ckpt["model"], strict=False)
         logger.info("Target network initialized with Stage 1 weights (strict=False)")
-        # RIICHI embedding 冷启动初始化（Stage 1 未训练过 RIICHI 候选）
-        if cfg.get("reinit_riichi_embed", True):
-            _init_riichi_embed(trainer.model, device=str(device))
-            _init_riichi_embed(trainer.target_model, device=str(device))
     else:
         logger.warning("No checkpoint or stage1_ckpt/stage2_ckpt found, training from scratch")
+
+    # RIICHI embedding 初始化：由 yaml 的 reinit_riichi_embed 独立控制
+    # true  → 无论是 resume 还是从 S1/S2 加载，都执行一次 reinit
+    #         适用场景：S1/S2 没有训练过 RIICHI 候选（老版本），embedding 是噪声
+    # false → 不执行，保留当前 checkpoint 里的 embedding
+    #         适用场景：新版本 S1/S2 数据里已有 RIICHI 信号，embedding 已有意义
+    if cfg.get("reinit_riichi_embed", False):
+        _init_riichi_embed(trainer.model, device=str(device))
+        _init_riichi_embed(trainer.target_model, device=str(device))
 
     ckpt_dir.mkdir(parents=True, exist_ok=True)
     total_steps = int(cfg.get("total_steps", 100_000))

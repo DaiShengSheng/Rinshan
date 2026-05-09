@@ -21,14 +21,13 @@ model_preset: base
 stage1_ckpt: /root/autodl-tmp/rinshan/checkpoints/stage1_base/best_v3.pt
 stage2_ckpt: /root/autodl-tmp/rinshan/checkpoints/stage2_base/best_v4_fixed.pt
 
-# ── RIICHI 冷启动初始化 ───────────────────────────────────────────────────────
-# Stage 1/2 的候选区从未出现 RIICHI_TOKEN(497)，其 embedding 等价于随机初始化。
-# True（默认）：从 Stage 2 / Stage 1 权重加载后，用相邻 special-action token
-#   (TSUMO/RON/RYUKYOKU/PASS) 的 embedding 均值覆盖 RIICHI 的 embedding，
-#   为 Bellman 回传提供合理起点。
-# False：禁用此初始化（仅在已有 Stage 3 中间 checkpoint 续训时应设为 False，
-#   因为此时 RIICHI embedding 已经在 Stage 3 中得到过训练）。
-reinit_riichi_embed: true
+# ── RIICHI embedding 初始化 ──────────────────────────────────────────────────
+# 独立于加载分支，无论是 resume 还是从 S1/S2 加载，flag 都生效。
+# true ：启动时执行一次 reinit，用相邻 special-action token 均值覆盖 RIICHI embedding。
+#        适用：老版 S1/S2 里没有 RIICHI 候选样本，embedding 是噪声，需要重新初始化。
+# false：保留 checkpoint 里现有的 RIICHI embedding，不做任何修改。
+#        适用：新版 S1/S2 已包含 RIICHI 训练信号，embedding 本身已有意义。
+reinit_riichi_embed: false
 
 data_dir: /root/autodl-tmp/rinshan/data/annotated_grp
 # 注意：GRP 2.0 不再把每局 reward 广播到所有 action。
