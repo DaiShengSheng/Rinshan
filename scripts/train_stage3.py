@@ -52,6 +52,7 @@ def _arena_gate(cfg: dict, ckpt_path: Path, step: int, save_dir: Path) -> tuple[
         "--model_preset", str(cfg.get("model_preset", "base")),
         "--n_games", str(gate_games),
         "--parallel_games", str(cfg.get("arena_parallel_games", gate_games)),
+        "--parallel_groups", str(cfg.get("arena_parallel_groups", 1)),
         "--device", str(cfg.get("arena_device", cfg.get("device", "cuda"))),
         "--seed", str(int(cfg.get("arena_seed", 1234)) + int(step)),
         "--greedy",
@@ -211,6 +212,7 @@ def main():
         hand_expectile      = float(cfg.get("hand_expectile", 0.70)),
         game_reward_weight  = float(cfg.get("game_reward_weight", 1.0)),
         hand_reward_weight  = float(cfg.get("hand_reward_weight", 1.0)),
+        arena_gate_every  = float(cfg.get("arena_gate_every", 0.0)),
         riichi_legal_sample_weight = float(cfg.get("riichi_legal_sample_weight", 1.0)),
         riichi_bc_scale     = float(cfg.get("riichi_bc_scale", 1.0)),
         stage3_anchor_weight = float(cfg.get("stage3_anchor_weight", 0.0)),
@@ -463,9 +465,12 @@ def main():
                 best_val_ckpt["best_gate_delta"] = best_gate_delta
                 torch.save(best_val_ckpt, ckpt_dir / "best_val.pt")
 
-            # best.pt 以 arena 为主：每次验证都跑 gate，只有 gate 更优才更新 best.pt。
-            # best_val.pt 继续追踪验证 loss 最优，供数值诊断；best.pt 代表实战最强模型。
-            if cfg.get("arena_gate_games", 0):
+            # best.pt 以 arena 为主，但 arena 开销大，按 arena_gate_every 节流
+            # arena_gate_every=N 表示每 N 次 val 触发一次 gate（0=每次都跑）
+            _arena_gate_every = int(trainer_cfg.arena_gate_every) if trainer_cfg.arena_gate_every > 0 else 1
+            _val_count = step // val_every   # 已经到第几次 val
+            _should_gate = cfg.get("arena_gate_games", 0) and (_val_count % _arena_gate_every == 0)
+            if _should_gate:
                 gate_ckpt = ckpt_dir / f"gate_eval_step{step}.pt"
                 trainer.save(gate_ckpt)
                 passed, gate_metrics = _arena_gate(cfg, gate_ckpt, step, ckpt_dir)
@@ -482,6 +487,13 @@ def main():
                     gate_ckpt.unlink()
                 except FileNotFoundError:
                     pass
+            elif is_best_val and not cfg.get("arena_gate_games", 0):
+                # 没有 arena gate 时，由 best_val 居个指导 best.pt
+                trainer.save(ckpt_dir / "best.pt")
+                best_ckpt = torch.load(ckpt_dir / "best.pt", map_location="cpu", weights_only=True)
+                best_ckpt["best_val_loss"] = best_val_loss
+                best_ckpt["best_gate_delta"] = best_gate_delta
+                torch.save(best_ckpt, ckpt_dir / "best.pt")
 
     logger.info("Stage 3 complete")
     trainer.save(ckpt_dir / "final.pt")

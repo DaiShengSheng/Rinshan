@@ -9,10 +9,10 @@ stage2_ckpt: checkpoints/stage2_nano/best.pt
 reinit_riichi_embed: false
 # Stage3: 普通打牌保持稳定，仅对可立直局面提升学习密度
 riichi_legal_sample_weight: 3.0
-riichi_bc_scale: 0.0
+riichi_bc_scale: 0.5  # 0=豁免会坍塌，建议>=0.5
 stage3_anchor_weight: 0.2
 stage3_anchor_temperature: 1.0
-riichi_rank_weight: 0.2
+riichi_rank_weight: 0.1
 riichi_margin: 0.2
 
 data_dir: data/annotated_grp
@@ -42,6 +42,8 @@ hand_reward_weight: 1.0
 target_update_every: 100
 arena_gate_games: 200
 arena_parallel_games: 64
+arena_parallel_groups: 16
+arena_gate_every: 5
 arena_gate_rank_delta_threshold: 0.0
 arena_gate_baseline_ckpt: checkpoints/stage2_nano/best.pt
 

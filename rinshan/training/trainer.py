@@ -80,11 +80,12 @@ class TrainerConfig:
     game_reward_weight: float = 1.0 # game branch reward scale
     hand_reward_weight: float = 1.0 # hand branch reward scale
     riichi_legal_sample_weight: float = 1.0  # 立直合法状态的整体 loss 放大系数
-    riichi_bc_scale: float = 1.0             # 选择 RIICHI 动作时的 BC 缩放（0=豁免, 1=全量）
+    riichi_bc_scale: float = 1.0             # 选择 RIICHI 动作时的 BC 缩放（0=豁免, 1=全量；建议 >=0.5，否则模型无约束坍塌为全宣立直）
     stage3_anchor_weight: float = 0.0        # Stage2 基线锚定强度：仅约束非 RIICHI 动作子空间
     stage3_anchor_temperature: float = 1.0   # Stage3 anchor KL 温度
     riichi_rank_weight: float = 0.0          # RIICHI 排序辅助损失权重
     riichi_margin: float = 0.2               # 要求 Q(riichi) 至少高于最佳非 riichi 动作的 margin
+    arena_gate_every: int = 0                # 每隔多少个 val_every 触发一次 arena gate（0=每次 val 都触发）
 
 
 class Trainer:

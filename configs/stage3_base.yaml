@@ -68,13 +68,10 @@ hand_reward_weight: 1.0
 # 立直专项强化：当前状态合法动作里包含 RIICHI 时，整个样本 loss 放大
 riichi_legal_sample_weight: 3.0
 # 选择 RIICHI 动作时的 BC 缩放：0=完全豁免，1=和普通动作一样
-riichi_bc_scale: 0.0
-# Stage3 启动后直接可跑：
-# - 非 RIICHI 动作子空间用 Stage2 分布做 KL anchor，稳住普通打牌
-# - RIICHI 动作用排序辅助损失，帮助更快学出“立/不立”的价值判断
+riichi_bc_scale: 0.5  # 0=豁免会坍塌为「遇RIICHI必宣」，建议>=0.5
 stage3_anchor_weight: 0.2
 stage3_anchor_temperature: 1.0
-riichi_rank_weight: 0.2
+riichi_rank_weight: 0.1
 riichi_margin: 0.2
 
 # Belief/Wait 权重
@@ -87,6 +84,8 @@ wait_weight:       0.1
 target_update_every: 100
 arena_gate_games: 200
 arena_parallel_games: 64
+arena_parallel_groups: 16
+arena_gate_every: 5
 arena_gate_rank_delta_threshold: 0.0
 arena_gate_baseline_ckpt: /root/autodl-tmp/rinshan/checkpoints/stage2_base/best_v4_fixed.pt
 
