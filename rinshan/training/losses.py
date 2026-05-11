@@ -214,6 +214,15 @@ def iql_loss(
     awr_temperature: float = 3.0,
     awr_max_weight: float = 20.0,
     riichi_action_mask: Optional[torch.Tensor] = None,  # (B,) bool，True = 本样本选择了 RIICHI
+    riichi_legal_mask: Optional[torch.Tensor] = None,   # (B,) bool，True = 当前状态合法动作里包含 RIICHI
+    riichi_legal_sample_weight: float = 1.0,
+    riichi_bc_scale: float = 1.0,
+    anchor_q: Optional[torch.Tensor] = None,
+    non_riichi_action_mask: Optional[torch.Tensor] = None,
+    anchor_kl_weight: float = 0.0,
+    anchor_temperature: float = 1.0,
+    riichi_rank_weight: float = 0.0,
+    riichi_margin: float = 0.2,
     q_game: Optional[torch.Tensor] = None,
     v_game: Optional[torch.Tensor] = None,
     v_next_game: Optional[torch.Tensor] = None,
@@ -248,6 +257,16 @@ def iql_loss(
     B = q.shape[0]
     losses = {}
 
+    sample_weight = torch.ones(B, device=q.device, dtype=torch.float32)
+    if riichi_legal_mask is not None and riichi_legal_sample_weight != 1.0:
+        sample_weight = torch.where(
+            riichi_legal_mask,
+            torch.full_like(sample_weight, float(riichi_legal_sample_weight)),
+            sample_weight,
+        )
+        losses["riichi_legal_count"] = float(riichi_legal_mask.sum().item())
+        losses["riichi_legal_sample_weight"] = float(riichi_legal_sample_weight)
+
     # 取执行动作的 Q 值
     idx = torch.arange(B, device=q.device)
     q_taken = q[idx, action_idx]   # (B,)
@@ -263,16 +282,18 @@ def iql_loss(
     # 1. Q-Loss: Bellman 残差
     v_next_masked = torch.where(done, torch.zeros_like(v_next), v_next)
     q_target_bellman = (reward + gamma * v_next_masked).detach().clamp(-value_clip, value_clip)
-    q_loss = F.mse_loss(q_taken, q_target_bellman)
+    q_loss_vec = F.mse_loss(q_taken, q_target_bellman, reduction="none")
+    q_loss = (q_loss_vec * sample_weight).mean()
     losses["q_loss"] = float(q_loss.detach().cpu())
 
     # 2. V-Loss: Expectile 回归（应使用当前状态 target Q，而不是 next-state Q）
     adv = (q_target.detach() - v).clamp(-value_clip, value_clip)
-    v_loss = torch.where(
+    v_loss_vec = torch.where(
         adv >= 0,
         expectile       * adv.pow(2),
         (1 - expectile) * adv.pow(2),
-    ).mean()
+    )
+    v_loss = (v_loss_vec * sample_weight).mean()
     losses["v_loss"] = float(v_loss.detach().cpu())
 
     # 3.5 双 value 分支损失（GRP 2.0 完全体）
@@ -285,13 +306,15 @@ def iql_loss(
         q_game_taken = torch.nan_to_num(q_game_taken.float(), nan=0.0, posinf=value_clip, neginf=-value_clip).clamp(-value_clip, value_clip)
         q_target_game = torch.nan_to_num(q_target_game.float(), nan=0.0, posinf=value_clip, neginf=-value_clip).clamp(-value_clip, value_clip)
         q_game_bellman = (reward_game * game_reward_weight + gamma * torch.where(done, torch.zeros_like(v_next_game), v_next_game)).detach().clamp(-value_clip, value_clip)
-        q_game_loss = F.mse_loss(q_game_taken, q_game_bellman)
+        q_game_loss = (F.mse_loss(q_game_taken, q_game_bellman, reduction="none") * sample_weight).mean()
         game_tau = expectile if game_expectile is None else game_expectile
         adv_game = (q_target_game.detach() - v_game).clamp(-value_clip, value_clip)
-        v_game_loss = torch.where(
-            adv_game >= 0,
-            game_tau * adv_game.pow(2),
-            (1 - game_tau) * adv_game.pow(2),
+        v_game_loss = (
+            torch.where(
+                adv_game >= 0,
+                game_tau * adv_game.pow(2),
+                (1 - game_tau) * adv_game.pow(2),
+            ) * sample_weight
         ).mean()
         branch_total = branch_total + q_game_loss + v_weight * v_game_loss
         losses["q_game_loss"] = float(q_game_loss.detach().cpu())
@@ -305,13 +328,15 @@ def iql_loss(
         q_hand_taken = torch.nan_to_num(q_hand_taken.float(), nan=0.0, posinf=value_clip, neginf=-value_clip).clamp(-value_clip, value_clip)
         q_target_hand = torch.nan_to_num(q_target_hand.float(), nan=0.0, posinf=value_clip, neginf=-value_clip).clamp(-value_clip, value_clip)
         q_hand_bellman = (reward_hand * hand_reward_weight + gamma * torch.where(done, torch.zeros_like(v_next_hand), v_next_hand)).detach().clamp(-value_clip, value_clip)
-        q_hand_loss = F.mse_loss(q_hand_taken, q_hand_bellman)
+        q_hand_loss = (F.mse_loss(q_hand_taken, q_hand_bellman, reduction="none") * sample_weight).mean()
         hand_tau = expectile if hand_expectile is None else hand_expectile
         adv_hand = (q_target_hand.detach() - v_hand).clamp(-value_clip, value_clip)
-        v_hand_loss = torch.where(
-            adv_hand >= 0,
-            hand_tau * adv_hand.pow(2),
-            (1 - hand_tau) * adv_hand.pow(2),
+        v_hand_loss = (
+            torch.where(
+                adv_hand >= 0,
+                hand_tau * adv_hand.pow(2),
+                (1 - hand_tau) * adv_hand.pow(2),
+            ) * sample_weight
         ).mean()
         branch_total = branch_total + q_hand_loss + v_weight * v_hand_loss
         losses["q_hand_loss"] = float(q_hand_loss.detach().cpu())
@@ -321,7 +346,8 @@ def iql_loss(
     cql = torch.tensor(0.0, device=q.device)
     if offline and cql_weight > 0:
         q_safe = torch.nan_to_num(q.float(), nan=-1e9, neginf=-1e9, posinf=value_clip)
-        cql = q_safe.logsumexp(dim=-1).mean() - q_taken.mean()
+        cql = (q_safe.logsumexp(dim=-1) - q_taken)
+        cql = (cql * sample_weight).mean()
         cql = torch.nan_to_num(cql, nan=0.0, posinf=value_clip, neginf=-value_clip).clamp(-value_clip, value_clip)
         losses["cql_loss"] = float(cql.detach().cpu())
 
@@ -333,15 +359,51 @@ def iql_loss(
         taken_log_prob = log_probs[idx, action_idx]
         adv_for_policy = (q_target.detach() - v.detach()).clamp(-adv_clip, adv_clip)
         weights = torch.exp(adv_for_policy / max(awr_temperature, 1e-6)).clamp(max=awr_max_weight)
-        # RIICHI 冷启动豁免：Stage2 对立直无基线，BC 权重清零，避免随机信号锚定立直 Q 值
+        # 对普通打牌保持 Stage2 风格约束；对 RIICHI 动作单独调低/豁免 BC，给它更多学习空间
         if riichi_action_mask is not None and riichi_action_mask.any():
-            weights = weights * (~riichi_action_mask).float()
-            losses["riichi_bc_exempt"] = float(riichi_action_mask.sum().item())
-        bc_loss = -(weights * taken_log_prob).mean()
+            scale = torch.ones_like(weights)
+            scale = torch.where(riichi_action_mask, torch.full_like(scale, float(riichi_bc_scale)), scale)
+            weights = weights * scale
+            losses["riichi_bc_exempt"] = float((riichi_action_mask & (scale == 0)).sum().item())
+            losses["riichi_bc_scale"] = float(riichi_bc_scale)
+        bc_loss = -((weights * taken_log_prob) * sample_weight).mean()
         losses["bc_loss"] = float(bc_loss.detach().cpu())
         losses["awr_weight_mean"] = float(weights.detach().mean().cpu())
 
-    total = q_loss + v_weight * v_loss + branch_total + cql_weight * cql + bc_weight * bc_loss
+    anchor_kl = torch.tensor(0.0, device=q.device)
+    if anchor_kl_weight > 0 and anchor_q is not None and non_riichi_action_mask is not None:
+        mask = non_riichi_action_mask.bool()
+        valid_rows = mask.any(dim=-1)
+        if valid_rows.any():
+            student_q_anchor = q.float().masked_fill(~mask, -1e9)
+            teacher_q_anchor = anchor_q.detach().float().masked_fill(~mask, -1e9)
+            student_log_probs = F.log_softmax(student_q_anchor[valid_rows] / max(anchor_temperature, 1e-6), dim=-1)
+            teacher_probs = F.softmax(teacher_q_anchor[valid_rows] / max(anchor_temperature, 1e-6), dim=-1)
+            row_weight = sample_weight[valid_rows]
+            per_row_kl = F.kl_div(student_log_probs, teacher_probs, reduction="none").sum(dim=-1)
+            anchor_kl = (per_row_kl * row_weight).mean()
+            losses["anchor_kl"] = float(anchor_kl.detach().cpu())
+
+    riichi_rank_loss = torch.tensor(0.0, device=q.device)
+    if riichi_rank_weight > 0 and riichi_action_mask is not None and riichi_legal_mask is not None and riichi_action_mask.any():
+        riichi_rows = riichi_action_mask.bool() & riichi_legal_mask.bool()
+        if riichi_rows.any():
+            q_sel = q[riichi_rows].float()
+            action_sel = action_idx[riichi_rows]
+            riichi_q = q_sel[torch.arange(action_sel.shape[0], device=q.device), action_sel]
+            non_riichi_mask = torch.ones_like(q_sel, dtype=torch.bool)
+            non_riichi_mask[torch.arange(action_sel.shape[0], device=q.device), action_sel] = False
+            non_riichi_q = q_sel.masked_fill(~non_riichi_mask, float("-inf")).max(dim=-1).values
+            margin_target = riichi_margin + non_riichi_q - riichi_q
+            riichi_rank_loss = (F.relu(margin_target) * sample_weight[riichi_rows]).mean()
+            losses["riichi_rank_loss"] = float(riichi_rank_loss.detach().cpu())
+
+    total = (
+        q_loss + v_weight * v_loss + branch_total
+        + cql_weight * cql + bc_weight * bc_loss
+        + anchor_kl_weight * anchor_kl
+        + riichi_rank_weight * riichi_rank_loss
+    )
     total = torch.nan_to_num(total, nan=1e3, posinf=1e3, neginf=-1e3)
     losses["total"] = float(total.detach().cpu())
     return total, losses

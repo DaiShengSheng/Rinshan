@@ -79,6 +79,12 @@ class TrainerConfig:
     hand_expectile: float = 0.70    # GRP 2.0: hand branch expectile
     game_reward_weight: float = 1.0 # game branch reward scale
     hand_reward_weight: float = 1.0 # hand branch reward scale
+    riichi_legal_sample_weight: float = 1.0  # 立直合法状态的整体 loss 放大系数
+    riichi_bc_scale: float = 1.0             # 选择 RIICHI 动作时的 BC 缩放（0=豁免, 1=全量）
+    stage3_anchor_weight: float = 0.0        # Stage2 基线锚定强度：仅约束非 RIICHI 动作子空间
+    stage3_anchor_temperature: float = 1.0   # Stage3 anchor KL 温度
+    riichi_rank_weight: float = 0.0          # RIICHI 排序辅助损失权重
+    riichi_margin: float = 0.2               # 要求 Q(riichi) 至少高于最佳非 riichi 动作的 margin
 
 
 class Trainer:
@@ -348,6 +354,22 @@ class Trainer:
                 _chosen_t  = _cand_reg[torch.arange(action_idx.shape[0],
                                        device=action_idx.device), action_idx]  # (B,)
                 riichi_mask = (_chosen_t == _RIICHI_TOKEN)             # (B,) bool
+                riichi_candidate_mask = (_cand_reg == _RIICHI_TOKEN)           # (B, C) bool
+                riichi_legal_mask = riichi_candidate_mask.any(dim=-1)          # (B,) bool
+
+                anchor_q = None
+                non_riichi_action_mask = None
+                if self.oracle_model is not None and self.cfg.stage3_anchor_weight > 0:
+                    with torch.no_grad():
+                        anchor_out = self.oracle_model(
+                            tokens=self._to_device(batch["tokens"]),
+                            candidate_mask=self._to_device(batch["candidate_mask"]),
+                            pad_mask=self._to_device(batch.get("pad_mask")),
+                            belief_tokens=self._to_device(batch.get("belief_tokens")),
+                            belief_pad_mask=self._to_device(batch.get("belief_pad_mask")),
+                        )
+                    anchor_q = anchor_out.q
+                    non_riichi_action_mask = self._to_device(batch["candidate_mask"]).bool() & (~riichi_candidate_mask)
 
                 # 在线场景允许通过 batch["_online_cql_weight"] 覆盖 CQL 权重
                 cql_w = batch.get("_online_cql_weight", None)
@@ -387,6 +409,15 @@ class Trainer:
                     game_reward_weight=self.cfg.game_reward_weight,
                     hand_reward_weight=self.cfg.hand_reward_weight,
                     riichi_action_mask=riichi_mask,
+                    riichi_legal_mask=riichi_legal_mask,
+                    riichi_legal_sample_weight=self.cfg.riichi_legal_sample_weight,
+                    riichi_bc_scale=self.cfg.riichi_bc_scale,
+                    anchor_q=anchor_q,
+                    non_riichi_action_mask=non_riichi_action_mask,
+                    anchor_kl_weight=self.cfg.stage3_anchor_weight,
+                    anchor_temperature=self.cfg.stage3_anchor_temperature,
+                    riichi_rank_weight=self.cfg.riichi_rank_weight,
+                    riichi_margin=self.cfg.riichi_margin,
                     **extra_kwargs,
                 )
 

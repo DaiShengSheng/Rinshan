@@ -33,6 +33,8 @@ sys.path.insert(0, str(Path(__file__).parents[1]))
 from rinshan.utils.config import load_config
 from rinshan.data         import MjaiDataset, collate_fn
 from rinshan.training     import Trainer, TrainerConfig
+from rinshan.model.full_model import RinshanModel
+from rinshan.model.transformer import TransformerConfig
 
 
 def _arena_gate(cfg: dict, ckpt_path: Path, step: int, save_dir: Path) -> tuple[bool, dict]:
@@ -209,9 +211,30 @@ def main():
         hand_expectile      = float(cfg.get("hand_expectile", 0.70)),
         game_reward_weight  = float(cfg.get("game_reward_weight", 1.0)),
         hand_reward_weight  = float(cfg.get("hand_reward_weight", 1.0)),
+        riichi_legal_sample_weight = float(cfg.get("riichi_legal_sample_weight", 1.0)),
+        riichi_bc_scale     = float(cfg.get("riichi_bc_scale", 1.0)),
+        stage3_anchor_weight = float(cfg.get("stage3_anchor_weight", 0.0)),
+        stage3_anchor_temperature = float(cfg.get("stage3_anchor_temperature", 1.0)),
+        riichi_rank_weight  = float(cfg.get("riichi_rank_weight", 0.0)),
+        riichi_margin       = float(cfg.get("riichi_margin", 0.2)),
     )
     trainer = Trainer(trainer_cfg)
     device  = trainer.device
+
+    if trainer_cfg.stage3_anchor_weight > 0 and stage2_ckpt and Path(stage2_ckpt).exists():
+        logger.info("Building Stage2 anchor model from %s", stage2_ckpt)
+        anchor_cfg = TransformerConfig.from_preset(trainer_cfg.model_preset)
+        anchor_model = RinshanModel(
+            transformer_cfg=anchor_cfg,
+            use_belief=True,
+            use_aux=False,
+            gradient_checkpointing=False,
+        )
+        s2_anchor_ckpt = torch.load(stage2_ckpt, map_location=device, weights_only=True)
+        anchor_state = s2_anchor_ckpt["model"] if "model" in s2_anchor_ckpt else s2_anchor_ckpt
+        anchor_model.load_state_dict(anchor_state, strict=False)
+        trainer.set_oracle_model(anchor_model)
+        logger.info("Stage2 anchor model attached for Stage3 non-riichi KL anchor")
 
     # ── 断点续训：优先恢复已有 checkpoint，否则从 Stage 1 初始化 ──
     # lr 变化时自动切换到 best.pt 权重，optimizer/scheduler 用新 lr 重建
@@ -341,25 +364,36 @@ def main():
             _ema_prev.update(_ema)
 
         if step % val_every == 0:
-            # 验证集 IQL 损失 + belief 召回率
+            # 验证集 IQL 损失 + belief 召回率 + Stage3 立直/稳定性看板
             trainer.model.eval()
-            val_keys = ["q_loss", "v_loss", "bc_loss", "cql_loss", "belief", "wait", "total"]
+            val_keys = ["q_loss", "v_loss", "bc_loss", "cql_loss", "anchor_kl", "riichi_rank_loss", "belief", "wait", "total"]
             val_sums: dict[str, float] = {k: 0.0 for k in val_keys}
-            import torch.nn.functional as F
+            from rinshan.constants import MAX_CANDIDATES_LEN, RIICHI_TOKEN
             bel_tp = bel_total = 0
+            riichi_legal_count = 0
+            riichi_human_count = 0
+            riichi_pred_count = 0
+            riichi_match_count = 0
+            non_riichi_state_count = 0
+            non_riichi_anchor_agree = 0
             n_val = 0
             with torch.no_grad():
                 for vb in val_loader:
                     _, ld = trainer._forward_and_loss(vb)
                     for k in val_keys:
                         val_sums[k] += ld.get(k, 0.0)
-                    # belief 召回率
+                    # belief 召回率 + 立直看板 + 普通打牌稳定性看板
+                    tokens = trainer._to_device(vb["tokens"])
+                    candidate_mask = trainer._to_device(vb["candidate_mask"])
+                    pad_mask = trainer._to_device(vb.get("pad_mask"))
+                    belief_tokens = trainer._to_device(vb.get("belief_tokens"))
+                    belief_pad_mask = trainer._to_device(vb.get("belief_pad_mask"))
                     s_out = trainer.model(
-                        tokens=trainer._to_device(vb["tokens"]),
-                        candidate_mask=trainer._to_device(vb["candidate_mask"]),
-                        pad_mask=trainer._to_device(vb.get("pad_mask")),
-                        belief_tokens=trainer._to_device(vb.get("belief_tokens")),
-                        belief_pad_mask=trainer._to_device(vb.get("belief_pad_mask")),
+                        tokens=tokens,
+                        candidate_mask=candidate_mask,
+                        pad_mask=pad_mask,
+                        belief_tokens=belief_tokens,
+                        belief_pad_mask=belief_pad_mask,
                     )
                     if s_out.belief_logits is not None and vb.get("actual_hands") is not None:
                         ah   = trainer._to_device(vb["actual_hands"]).float()
@@ -367,6 +401,34 @@ def main():
                         tgt  = (ah > 0).float()
                         bel_tp    += (pred * tgt).sum().item()
                         bel_total += tgt.sum().item()
+
+                    cand_region = tokens[:, -MAX_CANDIDATES_LEN:]
+                    riichi_candidate_mask = (cand_region == RIICHI_TOKEN)
+                    riichi_legal_mask = riichi_candidate_mask.any(dim=-1)
+                    pred_action_idx = s_out.q.argmax(dim=-1)
+                    pred_token = cand_region[torch.arange(pred_action_idx.shape[0], device=pred_action_idx.device), pred_action_idx]
+                    human_action_idx = vb["action_idx"].to(trainer.device)
+                    human_token = cand_region[torch.arange(human_action_idx.shape[0], device=human_action_idx.device), human_action_idx]
+                    pred_riichi = (pred_token == RIICHI_TOKEN)
+                    human_riichi = (human_token == RIICHI_TOKEN)
+                    riichi_legal_count += int(riichi_legal_mask.sum().item())
+                    riichi_human_count += int((riichi_legal_mask & human_riichi).sum().item())
+                    riichi_pred_count += int((riichi_legal_mask & pred_riichi).sum().item())
+                    riichi_match_count += int((riichi_legal_mask & human_riichi & pred_riichi).sum().item())
+
+                    if trainer.oracle_model is not None:
+                        anchor_out = trainer.oracle_model(
+                            tokens=tokens,
+                            candidate_mask=candidate_mask,
+                            pad_mask=pad_mask,
+                            belief_tokens=belief_tokens,
+                            belief_pad_mask=belief_pad_mask,
+                        )
+                        non_riichi_state_mask = ~riichi_legal_mask
+                        if non_riichi_state_mask.any():
+                            anchor_pred_idx = anchor_out.q.argmax(dim=-1)
+                            non_riichi_state_count += int(non_riichi_state_mask.sum().item())
+                            non_riichi_anchor_agree += int(((pred_action_idx == anchor_pred_idx) & non_riichi_state_mask).sum().item())
                     n_val += 1
                     if n_val >= 50:
                         break
@@ -375,10 +437,21 @@ def main():
             bel_recall = bel_tp / max(bel_total, 1)
             avgs = {k: val_sums[k] / n for k in val_keys}
             val_loss = avgs["total"]
+            riichi_human_rate = riichi_human_count / max(riichi_legal_count, 1)
+            riichi_pred_rate = riichi_pred_count / max(riichi_legal_count, 1)
+            riichi_recall = riichi_match_count / max(riichi_human_count, 1)
+            riichi_precision = riichi_match_count / max(riichi_pred_count, 1)
+            non_riichi_agree = non_riichi_anchor_agree / max(non_riichi_state_count, 1)
             logger.info(
                 f"[val step={step}] "
                 + "  ".join(f"{k}={avgs[k]:.4f}" for k in val_keys if avgs[k] != 0.0)
                 + f"  bel_recall={bel_recall:.3f}"
+                + f"  riichi_legal={riichi_legal_count}"
+                + f"  riichi_human_rate={riichi_human_rate:.3f}"
+                + f"  riichi_pred_rate={riichi_pred_rate:.3f}"
+                + f"  riichi_recall={riichi_recall:.3f}"
+                + f"  riichi_precision={riichi_precision:.3f}"
+                + (f"  nonriichi_anchor_agree={non_riichi_agree:.3f}" if non_riichi_state_count > 0 else "")
             )
             is_best_val = val_loss < best_val_loss
             if is_best_val:
@@ -390,28 +463,25 @@ def main():
                 best_val_ckpt["best_gate_delta"] = best_gate_delta
                 torch.save(best_val_ckpt, ckpt_dir / "best_val.pt")
 
-            # 推荐改：只有 val 创新低时才跑 arena gate，减少 Stage3 训练耗时
-            if cfg.get("arena_gate_games", 0) and is_best_val:
+            # best.pt 以 arena 为主：每次验证都跑 gate，只有 gate 更优才更新 best.pt。
+            # best_val.pt 继续追踪验证 loss 最优，供数值诊断；best.pt 代表实战最强模型。
+            if cfg.get("arena_gate_games", 0):
                 gate_ckpt = ckpt_dir / f"gate_eval_step{step}.pt"
                 trainer.save(gate_ckpt)
                 passed, gate_metrics = _arena_gate(cfg, gate_ckpt, step, ckpt_dir)
-                if passed and gate_metrics.get("delta_rank", float("inf")) < best_gate_delta:
-                    best_gate_delta = gate_metrics["delta_rank"]
+                gate_delta = gate_metrics.get("delta_rank", float("inf"))
+                if passed and gate_delta < best_gate_delta:
+                    best_gate_delta = gate_delta
                     trainer.save(ckpt_dir / "best.pt")
                     best_gate_ckpt = torch.load(ckpt_dir / "best.pt", map_location="cpu", weights_only=True)
                     best_gate_ckpt["best_val_loss"] = best_val_loss
                     best_gate_ckpt["best_gate_delta"] = best_gate_delta
                     torch.save(best_gate_ckpt, ckpt_dir / "best.pt")
+                    logger.info("[best step=%s] arena improved: delta_rank=%.4f", step, best_gate_delta)
                 try:
                     gate_ckpt.unlink()
                 except FileNotFoundError:
                     pass
-            elif is_best_val:
-                trainer.save(ckpt_dir / "best.pt")
-                best_ckpt = torch.load(ckpt_dir / "best.pt", map_location="cpu", weights_only=True)
-                best_ckpt["best_val_loss"] = best_val_loss
-                best_ckpt["best_gate_delta"] = best_gate_delta
-                torch.save(best_ckpt, ckpt_dir / "best.pt")
 
     logger.info("Stage 3 complete")
     trainer.save(ckpt_dir / "final.pt")

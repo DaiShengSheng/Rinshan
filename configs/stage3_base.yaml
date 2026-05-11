@@ -51,24 +51,37 @@ batch_size: 1024          # compile=True 下 93GB/96GB，effective batch=2048
 grad_accum_steps: 2       # 等效 batch=1024
 max_grad_norm: 1.0
 
-# CQL 稳定性保护
-cql_weight: 0.1
-bc_weight: 0.2
+# CQL / BC 稳定性保护
+# 目标：普通打牌尽量贴住 Stage2，不让 Stage3 漂成“乱打”；
+# 同时对“可立直局面”提高学习密度，并降低 RIICHI 动作本身的 BC 约束。
+cql_weight: 0.5
+bc_weight: 0.5
 reward_clip: 20.0
 value_clip: 50.0
-adv_clip: 20.0
+adv_clip: 5.0
 awr_temperature: 3.0
-awr_max_weight: 20.0
+awr_max_weight: 5.0
 game_expectile: 0.95
 hand_expectile: 0.70
 game_reward_weight: 1.0
 hand_reward_weight: 1.0
+# 立直专项强化：当前状态合法动作里包含 RIICHI 时，整个样本 loss 放大
+riichi_legal_sample_weight: 3.0
+# 选择 RIICHI 动作时的 BC 缩放：0=完全豁免，1=和普通动作一样
+riichi_bc_scale: 0.0
+# Stage3 启动后直接可跑：
+# - 非 RIICHI 动作子空间用 Stage2 分布做 KL anchor，稳住普通打牌
+# - RIICHI 动作用排序辅助损失，帮助更快学出“立/不立”的价值判断
+stage3_anchor_weight: 0.2
+stage3_anchor_temperature: 1.0
+riichi_rank_weight: 0.2
+riichi_margin: 0.2
 
 # Belief/Wait 权重
-# Stage2 用 wait_weight=0.1 预热 wait_head，Stage3 放开到 0.5
-belief_weight:     1.0
+# Stage3 首要目标是稳住主策略，辅助头降权避免干扰出牌与立直学习
+belief_weight:     0.5
 belief_pos_weight: 2.4
-wait_weight:       0.5   # Stage3：wait_head 已预热，提高权重让待张预测充分收敛
+wait_weight:       0.1
 
 # IQL 超参
 target_update_every: 100
@@ -82,9 +95,9 @@ amp: true
 compile: true
 
 save_dir: /root/autodl-tmp/rinshan/checkpoints/stage3_base
-save_every: 5000
+save_every: 2000
 log_every: 100
-val_every: 2000
+val_every: 1000
 
 device: cuda
 num_workers: 16
