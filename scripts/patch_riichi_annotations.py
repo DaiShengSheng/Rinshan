@@ -9,8 +9,10 @@ Bug 背景：
   结果：所有立直宣言样本的 action_chosen 指向错误 DISCARD，RIICHI 学习信号为 0。
 
 修复1（立直宣言点）：
-  识别：riichi_declared[0]==True AND candidates 中含有 DISCARD token (37..73)
-  处理：action_candidates=[497], action_chosen=0
+  识别：riichi_declared[0]==True AND discard in cands AND melds[0] 为空（门清）
+  处理：保留原打牌候选 + 追加 RIICHI_TOKEN，action_chosen 指向 RIICHI
+  效果：IQL 能学到「同一局面人类选立直而非 damaten（打牌）」的 Q 对比信号
+  注：副露时不处理（melds[0] 非空，不能立直，修复2负责清残留 RIICHI）
 
 修复2（副露无法立直）：
   识别：riichi_declared[0]==False AND 497 in candidates AND melds[0] 非空
@@ -46,11 +48,16 @@ def patch_sample(d: dict) -> tuple[dict, bool]:
     action_chosen   = d.get("action_chosen", 0)
 
     # ── 修复1：立直宣言点 ──────────────────────────────────────────────────
-    # riichi_declared[0]=True（reach 事件已触发）+ candidates 含 DISCARD
-    # → 这是被 bug 错判为 DISCARD 的立直宣言决策点
-    if riichi_declared[0] and _has_discard(cands):
-        d["action_candidates"] = [RIICHI_TOKEN]
-        d["action_chosen"]     = 0
+    # riichi_declared[0]=True（reach 事件已触发）+ candidates 含 DISCARD + melds[0] 为空（门清）
+    # → 这是被 bug 丢掉了 RIICHI 候选的立直宣言决策点
+    # 正确做法：保留原打牌候选（作为对比），追加 RIICHI_TOKEN，action_chosen 指向 RIICHI
+    # 这样 IQL 才能学到「在这个局面人类选了立直而非打牌（damaten）」
+    # 副露情况（melds[0] 非空）：不能立直，不做处理（修复2会清掉残留的 RIICHI）
+    if riichi_declared[0] and _has_discard(cands) and not player_melds:
+        new_cands = [c for c in cands if c != RIICHI_TOKEN]  # 防止重复追加
+        new_cands.append(RIICHI_TOKEN)
+        d["action_candidates"] = new_cands
+        d["action_chosen"]     = len(new_cands) - 1          # 末尾的 RIICHI_TOKEN
         return d, True
 
     # ── 修复2：副露状态不能立直 ────────────────────────────────────────────
