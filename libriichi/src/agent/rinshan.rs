@@ -38,6 +38,7 @@ use crate::must_tile;
 use crate::arena::GameResult;
 use crate::mjai::{Event, EventExt};
 use crate::state::PlayerState;
+use crate::tile::Tile;
 
 use anyhow::{Context, Result};
 use pyo3::intern;
@@ -174,6 +175,16 @@ impl RinshanBatchAgent {
         })?;
 
         let size = player_ids.len();
+        // Use a random initial game_counter so that multiple RinshanBatchAgent
+        // instances sharing the same Python engine object use disjoint game_key
+        // namespaces in the Python-side _state_cache / _lr_trackers dicts.
+        // Without this, parallel workers all start at game_counter=0 and their
+        // cache keys collide, causing state corruption (consecutive tsumo bug).
+        let init_counter: u64 = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .subsec_nanos() as u64
+            ^ (player_ids.iter().fold(0u64, |a, &b| a.wrapping_mul(31).wrapping_add(b as u64)));
         Ok(Self {
             engine,
             name,
@@ -183,7 +194,7 @@ impl RinshanBatchAgent {
             pending: vec![None; size],
             responses: vec![None; size],
             evaluated: false,
-            game_counter: 0,
+            game_counter: init_counter,
         })
     }
 
@@ -658,6 +669,24 @@ impl BatchAgent for RinshanBatchAgent {
             self.evaluated = true;
         }
 
+        // Extract valid_discards from pending BEFORE clearing it, so we can
+        // use it as a trusted fallback when the Rust state has drifted.
+        let pending_valid_discards: Vec<Tile> = self.pending[index]
+            .as_ref()
+            .and_then(|p| p.get("valid_discards"))
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str())
+                    .filter_map(|s| {
+                        // valid_discards is in Rinshan format; convert to libriichi
+                        // format first, then parse.
+                        rinshan_tile_to_libriichi(s).parse::<Tile>().ok()
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
         // Clear pending for this slot.
         self.pending[index] = None;
 
@@ -665,11 +694,15 @@ impl BatchAgent for RinshanBatchAgent {
             let ev = py_dict_to_event(&resp, self.player_ids[index])?;
             // ── Dahai sanity-check ───────────────────────────────────────────
             // libriichi bug: tehais sent to Python can diverge from Rust's
-            // internal tehai, so the model may choose a tile that Rust doesn't
-            // consider to be in hand.  We catch that here (before board.step
-            // calls validate_reaction and panics) and fall back to:
-            //   1. tsumogiri the last drawn tile, if available, OR
-            //   2. the first legally discardable tile according to Rust state.
+            // internal tehai (especially under parallel_games>1), so the model
+            // may choose a tile that Rust no longer considers to be in hand.
+            // We catch that here and fall back using the following priority:
+            //   1. The same tile the model chose, if it appears in the
+            //      pending's valid_discards (state may have drifted but the
+            //      tile was legal at request time → try it first).
+            //   2. tsumogiri the last drawn tile, if available.
+            //   3. The first legally discardable tile according to current
+            //      Rust state.
             if let Event::Dahai { pai, .. } = ev.event {
                 let cans = state.last_cans();
                 if cans.can_discard {
@@ -677,21 +710,65 @@ impl BatchAgent for RinshanBatchAgent {
                     if !valid[pai.as_usize()] {
                         log::warn!(
                             "rinshan agent: dahai {} not in Rust hand (seat {}), \
-                             falling back to tsumogiri",
+                             trying valid_discards fallback",
                             pai,
                             self.player_ids[index],
                         );
-                        // fallback 1: tsumogiri
+                        // fallback 1: model's chosen tile is in pending valid_discards
+                        //             AND is also valid in current Rust state
+                        if let Some(&vd_tile) = pending_valid_discards
+                            .iter()
+                            .find(|&&t| t.deaka() == pai.deaka() && valid[t.as_usize()])
+                        {
+                            let tsumogiri = state
+                                .last_self_tsumo()
+                                .is_some_and(|t| t == vd_tile);
+                            return Ok(EventExt::no_meta(Event::Dahai {
+                                actor: self.player_ids[index],
+                                pai: vd_tile,
+                                tsumogiri,
+                            }));
+                        }
+                        // fallback 2: first tile in valid_discards that is valid now
+                        if let Some(&vd_tile) = pending_valid_discards
+                            .iter()
+                            .find(|&&t| valid[t.as_usize()])
+                        {
+                            let tsumogiri = state
+                                .last_self_tsumo()
+                                .is_some_and(|t| t == vd_tile);
+                            log::warn!(
+                                "rinshan agent: using first valid_discards tile {} (seat {})",
+                                vd_tile,
+                                self.player_ids[index],
+                            );
+                            return Ok(EventExt::no_meta(Event::Dahai {
+                                actor: self.player_ids[index],
+                                pai: vd_tile,
+                                tsumogiri,
+                            }));
+                        }
+                        // fallback 3: tsumogiri
                         if let Some(tsumo) = state.last_self_tsumo() {
+                            log::warn!(
+                                "rinshan agent: tsumogiri fallback {} (seat {})",
+                                tsumo,
+                                self.player_ids[index],
+                            );
                             return Ok(EventExt::no_meta(Event::Dahai {
                                 actor: self.player_ids[index],
                                 pai: tsumo,
                                 tsumogiri: true,
                             }));
                         }
-                        // fallback 2: first valid tile
+                        // fallback 4: first valid tile in current Rust state
                         if let Some(idx) = valid.iter().position(|&ok| ok) {
                             let fallback_pai = must_tile!(idx);
+                            log::warn!(
+                                "rinshan agent: first-valid fallback {} (seat {})",
+                                fallback_pai,
+                                self.player_ids[index],
+                            );
                             return Ok(EventExt::no_meta(Event::Dahai {
                                 actor: self.player_ids[index],
                                 pai: fallback_pai,

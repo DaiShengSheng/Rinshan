@@ -87,6 +87,10 @@ def parse_args():
     p.add_argument("--parallel_games", type=int, default=None,
                    help="Rust 后端每个 wave 并发局数（默认等于 n_games）；\n"
                         "调小降显存压力，调大提高 GPU 利用率")
+    p.add_argument("--parallel_groups", type=int, default=1,
+                   help="Rust 后端并行分组数（默认 1）；\n"
+                        "每组独立 agent 状态，消除跨局状态漂移。\n"
+                        "建议设为 CPU 核心数（如 16），每组跑 n_games/parallel_groups 局")
     # AI 模式参数
     p.add_argument("--ckpt",          type=str, default=None,
                    help="主模型 checkpoint 路径（ai/versus 模式必填）")
@@ -336,22 +340,28 @@ def _encode_naki_daiminkan(actor: int, target: int, pai: str, consumed: list[str
         return f"{cs[0]:02d}{cs[1]:02d}{cs[2]:02d}m{p:02d}"
 
 
-def _encode_naki_kakan(actor: int, pai: str, consumed: list[str]) -> str:
+def _encode_naki_kakan(actor: int, pai: str, consumed: list[str],
+                       pon_target: int | None) -> str:
     """
     加杠 → 天凤 discards 字符串（格式同碰，但用 k）
-    consumed[0..2] 是已碰的三张，consumed 里的 target 信息需从原碰牌方向推断。
-    我们这里用最简单的：从 mjai 的 consumed 判断哪张是「来自对家」。
+    pon_target: 原碰牌时的 target（绝对座位），用于推断 k 的位置。
     天凤格式：
-      previously pon from kamicha  → k{pai}{c0}{c1}{c2}
-      previously pon from toimen   → {c0}k{pai}{c1}{c2}
-      previously pon from shimocha → {c0}{c1}k{c2}{pai} (k在idx=4)
-    实际上加杠时 mjai 没有给出原碰方向，用 idx=0 (kamicha) 作为默认即可，
-    viewer 只需要知道是杠，不会影响回放正确性。
+      previously pon from kamicha  (rel=3) → k{pai}{c0}{c1}{c2}  (k在idx=0)
+      previously pon from toimen   (rel=2) → {c0}k{pai}{c1}{c2}  (k在idx=2)
+      previously pon from shimocha (rel=1) → {c0}{c1}k{pai}{c2}  (k在idx=4)
     """
     p = _t(pai)
     cs = [_t(c) for c in consumed]
-    # 天凤格式 k 在 idx=0 位置（previously pon from kamicha）
-    return f"k{p:02d}{cs[0]:02d}{cs[1]:02d}{cs[2]:02d}"
+    if pon_target is None:
+        # 无法确定方向时默认 kamicha
+        return f"k{p:02d}{cs[0]:02d}{cs[1]:02d}{cs[2]:02d}"
+    rel = (pon_target - actor) % 4
+    if rel == 3:   # kamicha
+        return f"k{p:02d}{cs[0]:02d}{cs[1]:02d}{cs[2]:02d}"
+    elif rel == 2: # toimen
+        return f"{cs[0]:02d}k{p:02d}{cs[1]:02d}{cs[2]:02d}"
+    else:          # shimocha rel==1
+        return f"{cs[0]:02d}{cs[1]:02d}k{p:02d}{cs[2]:02d}"
 
 
 def _encode_naki_ankan(actor: int, consumed: list[str]) -> str:
@@ -425,6 +435,8 @@ def mjai_events_to_tenhou(events: list[dict]) -> dict[str, Any]:
         # --- 结算 ---
         results: list[Any] = []
         pending_reach: list[bool] = [False, False, False, False]
+        # kakan 需要知道原碰牌的 target 方向：key=(actor, deaka_pai), value=target
+        pon_targets: dict[tuple[int, str], int] = {}
 
         i += 1
         while i < len(events):
@@ -442,9 +454,13 @@ def mjai_events_to_tenhou(events: list[dict]) -> dict[str, Any]:
 
             elif t_type == "dahai":
                 if pending_reach[actor]:
-                    # reach 后的第一张打牌 → 合并为 "r{pai}" 写入 discards
-                    pai_num = 60 if ev.get("tsumogiri", False) else _t(ev["pai"])
-                    discards[actor].append(f"r{pai_num:02d}")
+                    # reach 后的第一张打牌：
+                    # mjai 里 tsumogiri=True 时 pai 就是实际摸的那张，直接用
+                    # 天凤格式：r{实际pai数字}，tsumogiri 用 60
+                    if ev.get("tsumogiri", False):
+                        discards[actor].append(f"r60")
+                    else:
+                        discards[actor].append(f"r{_t(ev['pai']):02d}")
                     pending_reach[actor] = False
                 elif ev.get("tsumogiri", False):
                     discards[actor].append(60)
@@ -467,15 +483,25 @@ def mjai_events_to_tenhou(events: list[dict]) -> dict[str, Any]:
                 takes[actor].append(
                     _encode_naki_pon(actor, ev["target"], ev["pai"], ev["consumed"])
                 )
+                # 记录碰牌方向，供后续 kakan 使用
+                # key 用 deaka 化的牌名（0m→5m 等）以匹配 kakan 的 pai
+                deaka = ev["pai"].replace("0m","5m").replace("0p","5p").replace("0s","5s")
+                pon_targets[(actor, deaka)] = ev["target"]
 
             elif t_type == "daiminkan":
                 takes[actor].append(
                     _encode_naki_daiminkan(actor, ev["target"], ev["pai"], ev["consumed"])
                 )
+                # daiminkan 后天凤格式不需要在 discards 插 placeholder
+                # （mjai-reviewer finalize_discards 会删掉对应的 ? 占位）
+                # 我们直接不插入任何东西即可
 
             elif t_type == "kakan":
+                pai = ev["pai"]
+                deaka = pai.replace("0m","5m").replace("0p","5p").replace("0s","5s")
+                pon_target = pon_targets.get((actor, deaka))
                 discards[actor].append(
-                    _encode_naki_kakan(actor, ev["pai"], ev["consumed"])
+                    _encode_naki_kakan(actor, pai, ev["consumed"], pon_target)
                 )
 
             elif t_type == "ankan":
@@ -612,7 +638,11 @@ def evaluate_versus_strength(args, log_dir_override=None) -> dict:
                         enable_rule_based_agari_guard=True)
 
     effective_log_dir = log_dir_override if log_dir_override is not None else args.log_dir
-    arena = TwoVsTwo(disable_progress_bar=args.quiet, log_dir=effective_log_dir)
+    arena = TwoVsTwo(
+        disable_progress_bar=args.quiet,
+        log_dir=effective_log_dir,
+        parallel_groups=int(getattr(args, 'parallel_groups', 1) or 1),
+    )
     all_results = []
     generated = 0
     skipped = 0
@@ -962,7 +992,8 @@ def main():
     backend = "Rust libriichi" if use_rust else "Python Arena"
     print(f"[Rinshan] mode={args.mode}  n_games={args.n_games}  "
           f"seed={args.seed}  length={args.game_length}  "
-          f"backend={backend}  parallel_games={args.parallel_games}")
+          f"backend={backend}  parallel_games={args.parallel_games}  "
+          f"parallel_groups={getattr(args, 'parallel_groups', 1)}")
 
     # ── Rust 路径 ────────────────────────────────────────────────
     if use_rust:

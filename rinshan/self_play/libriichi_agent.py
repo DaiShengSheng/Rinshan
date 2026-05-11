@@ -395,6 +395,11 @@ class _LRStateTracker:
         但完全依赖 Rust 计算，不依赖 Python GameState。
         """
         if self._ps is None:
+            import logging as _log3
+            _log3.getLogger("rinshan_agent").warning(
+                "build_candidates: _ps is None for seat=%d n_events=%d",
+                self.seat, self._n_events,
+            )
             return []
         cans = self._ps.last_cans
         ptype = pending.get("type", "")
@@ -402,6 +407,9 @@ class _LRStateTracker:
 
         if ptype == "turn_action":
             # ── 打牌候选 ──────────────────────────────
+            # 注意：在 can_kakan / can_ankan 为 True 时，Rust 的 last_cans 仍可能同时保持
+            # can_discard=True；若直接从 tehai 枚举弃牌，会让模型在“应当先处理杠”的状态下
+            # 继续看到普通弃牌候选。这里仍保留基础枚举，但后面会被 pending 的合法性做二次裁剪。
             if cans.can_discard:
                 tehai = self._ps.tehai          # [u8; 34]，各牌张数
                 akas  = self._ps.akas_in_hand   # [bool; 3]：5m/5p/5s 是否有赤
@@ -425,7 +433,6 @@ class _LRStateTracker:
             if cans.can_tsumo_agari:
                 candidates.append(TSUMO_AGARI_TOKEN)
 
-            # ── 暗杠 ──────────────────────────────────
             # ── 暗杠 ──────────────────────────────────
             # 优先使用 Rust pending.ankan_candidates（最权威，Rust 直接下发的合法牌列表）。
             # 若 pending 里有此字段（新版 Rust），直接用；否则退回 player_events 扫描。
@@ -594,9 +601,10 @@ class LibriichiBoostedAgent(RinshanAgent):
                         player_events: list[dict]) -> _LRStateTracker:
         """按 (stable_game_key, seat) 获取或创建 tracker，增量更新事件。
 
-        Rust arena 的 _game_key 格式为 "rust:gN:iK"，其中 iK 在同一局内
-        可能随 iteration 变化（例如 reach 前后从 i0 变为 i2）。
-        只取 ":i" 之前的稳定前缀，保证同一局所有 pending 共享同一 tracker。
+        国切换检测逻辑（修复版）：
+        1. player_events 第一条是 start_kyoku → 必须全量重置（新局开始）
+        2. len(player_events) < tracker._n_events → 日志被清空，全量重置
+        3. 否则增量更新
         """
         _ri = game_key.find(":i")
         stable_key = game_key[:_ri] if _ri != -1 else game_key
@@ -606,8 +614,17 @@ class LibriichiBoostedAgent(RinshanAgent):
             tracker = _LRStateTracker(seat)
             self._lr_trackers[cache_key] = tracker
 
-        # 如果事件变少了（新局），重置
-        if len(player_events) < tracker._n_events:
+        # 检测新局开始：player_events[0] 为 start_kyoku 时强制全量重置
+        # 这是最可靠的检测方式，不依赖事件数量比较（避免两者都为0时的漏检）
+        is_new_kyoku = (
+            bool(player_events)
+            and player_events[0].get("type") == "start_kyoku"
+            and tracker._n_events > 0  # 已有历史才需要重置
+        ) or (
+            len(player_events) < tracker._n_events  # 日志被清空（end_kyoku 后）
+        )
+
+        if is_new_kyoku:
             tracker.feed_full(player_events)
         else:
             tracker.feed(player_events)
@@ -717,8 +734,10 @@ class LibriichiBoostedAgent(RinshanAgent):
                     batch_states.append(state)
                     continue
 
+                # 先把普通弃牌候选替换成 Rust 权威 valid_discards
                 candidates = _replace_discard_candidates_with_valid_discards(candidates, pending)
 
+                # 再严格按 pending 的 can_* 权威裁剪所有非 discard 动作，避免 stale can_*。
                 if "can_tsumo" in pending:
                     if pending.get("can_tsumo", False):
                         if TSUMO_AGARI_TOKEN not in candidates:
@@ -743,16 +762,38 @@ class LibriichiBoostedAgent(RinshanAgent):
                             candidates.append(RYUKYOKU_TOKEN)
                     else:
                         candidates = [t for t in candidates if t != RYUKYOKU_TOKEN]
-                if "can_ankan" in pending and not pending.get("can_ankan", False):
-                    candidates = [
-                        t for t in candidates
-                        if not (ANKAN_OFFSET <= t < ANKAN_OFFSET + NUM_TILE_TYPES)
-                    ]
-                if "can_kakan" in pending and not pending.get("can_kakan", False):
-                    candidates = [
-                        t for t in candidates
-                        if not (KAKAN_OFFSET <= t < KAKAN_OFFSET + NUM_TILE_TYPES)
-                    ]
+                if "can_ankan" in pending:
+                    if not pending.get("can_ankan", False):
+                        candidates = [
+                            t for t in candidates
+                            if not (ANKAN_OFFSET <= t < ANKAN_OFFSET + NUM_TILE_TYPES)
+                        ]
+                    else:
+                        # 只保留 pending 明确允许的 ankan 牌
+                        allowed = {
+                            ANKAN_OFFSET + Tile.from_mjai(p).tile_id
+                            for p in pending.get("ankan_candidates", [])
+                        }
+                        candidates = [
+                            t for t in candidates
+                            if not (ANKAN_OFFSET <= t < ANKAN_OFFSET + NUM_TILE_TYPES) or t in allowed
+                        ]
+                if "can_kakan" in pending:
+                    if not pending.get("can_kakan", False):
+                        candidates = [
+                            t for t in candidates
+                            if not (KAKAN_OFFSET <= t < KAKAN_OFFSET + NUM_TILE_TYPES)
+                        ]
+                    else:
+                        # 只保留 pending 明确允许的 kakan 牌，防止 stale can_kakan / stale tracker
+                        allowed = {
+                            KAKAN_OFFSET + Tile.from_mjai(p).tile_id
+                            for p in pending.get("kakan_candidates", [])
+                        }
+                        candidates = [
+                            t for t in candidates
+                            if not (KAKAN_OFFSET <= t < KAKAN_OFFSET + NUM_TILE_TYPES) or t in allowed
+                        ]
 
             if self.enable_rule_based_agari_guard:
                 pending["_rule_based_agari_guard"] = True
@@ -786,7 +827,37 @@ class LibriichiBoostedAgent(RinshanAgent):
                 continue
 
             if not candidates:
-                responses[i] = {"type": "pass", "actor": seat}
+                # turn_action인데 candidates가 비면 트래커 드리프트가 원인.
+                # pass를 반환하면 Rust가 Event::None으로 해석 → 연속 tsumo 발생.
+                # valid_discards 또는 강제 tsumogiri로 안전하게 fallback.
+                import logging as _log
+                _log.getLogger("rinshan_agent").warning(
+                    "empty candidates for seat=%d ptype=%s game_key=%s, "
+                    "falling back to safe discard",
+                    seat, ptype, pending.get("_game_key","?")
+                )
+                if ptype == "turn_action":
+                    vd = pending.get("valid_discards")
+                    if vd:
+                        responses[i] = {
+                            "type": "dahai", "actor": seat,
+                            "pai": vd[0], "tsumogiri": False,
+                        }
+                    elif pending.get("can_tsumo"):
+                        responses[i] = {"type": "hora", "actor": seat, "target": seat}
+                    else:
+                        # 최후 수단: last_self_tsumo 에서 tsumogiri
+                        lt = pending.get("forced_pai")
+                        if lt:
+                            responses[i] = {
+                                "type": "dahai", "actor": seat,
+                                "pai": lt,
+                                "tsumogiri": bool(pending.get("forced_tsumogiri", True)),
+                            }
+                        else:
+                            responses[i] = {"type": "pass", "actor": seat}
+                else:
+                    responses[i] = {"type": "pass", "actor": seat}
                 continue
 
             ann = _state_to_annotation(state, seat, player_events, candidates)
@@ -869,7 +940,18 @@ class LibriichiBoostedAgent(RinshanAgent):
         final = []
         for i, r in enumerate(responses):
             if r is None:
-                r = {"type": "pass", "actor": requests[i][0]}
+                import logging as _log2
+                seat_i, _evs_i, pend_i = requests[i]
+                _log2.getLogger("rinshan_agent").warning(
+                    "response[%d] is None (seat=%d ptype=%s), falling back to safe discard",
+                    i, seat_i, pend_i.get("type","?"),
+                )
+                # 从 valid_discards 恢复，避免触发连续 tsumo
+                vd = pend_i.get("valid_discards")
+                if vd and pend_i.get("type") == "turn_action":
+                    r = {"type": "dahai", "actor": seat_i, "pai": vd[0], "tsumogiri": False}
+                else:
+                    r = {"type": "pass", "actor": seat_i}
             # 修正 chi/pon/daiminkan consumed（用 Rust 权威手牌）
             if r.get("type") in ("chi", "pon", "daiminkan"):
                 seat_i, player_events_i, pending_i = requests[i]

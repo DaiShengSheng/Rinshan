@@ -359,14 +359,26 @@ class RinshanAgent(BaseAgent):
         cache_key = (stable_key, seat)
         cached = self._state_cache.get(cache_key)
 
-        if cached is None:
+        # 新局检测（修复连续 tsumo 根因）：
+        # Rust end_kyoku() 会清空 logs[]，导致 player_events = []。
+        # 此时 len(player_events)=0 == cached["n_events"]=0，走增量路径（无操作），
+        # 下一局 start_kyoku 事件追加后 len=1 > 0，但状态仍是上一局的残留。
+        # 修复：player_events[0] 是 start_kyoku 时，强制全量重放。
+        is_new_kyoku = (
+            cached is not None
+            and bool(player_events)
+            and player_events[0].get("type") == "start_kyoku"
+        ) or (
+            cached is not None
+            and len(player_events) < int(cached["n_events"])
+        )
+
+        if cached is None or is_new_kyoku:
             state = _replay_events_to_state(player_events, seat)
         else:
             state = cached["state"]
             n_events = int(cached["n_events"])
-            if len(player_events) < n_events:
-                state = _replay_events_to_state(player_events, seat)
-            elif len(player_events) > n_events:
+            if len(player_events) > n_events:
                 state = _advance_state_with_events(state, player_events[n_events:], pov_seat=seat)
 
         self._state_cache[cache_key] = {"state": state, "n_events": len(player_events)}
@@ -1422,12 +1434,16 @@ def _token_to_mjai(token: int, seat: int, state, pending: dict,
     if KAKAN_OFFSET <= token < KAKAN_OFFSET + NUM_TILE_TYPES:
         tile_id = token - KAKAN_OFFSET
         tile = next((t for t in state.hands[seat] if t.tile_id == tile_id), Tile(tile_id))
-        # Rust libriichi 的 kakan 反应只需要 pai；
-        # 若把原碰子的 3 张 consumed 一并传过去，Rust 可能在已有 pon 上重复 push，
-        # 触发 ArrayVec capacity overflow。
+        # 注意：Rust Event::Kakan 的反序列化要求必须带 consumed:[Tile;3]。
+        # 之前只返回 pai，py_dict_to_event 会反序列化失败并退化成 Event::None，
+        # 进而在 Rust board.step() 中表现为“连续 tsumo 同一 actor”。
+        # validate_reaction / update.kakan 实际只依赖 pai，不读取 consumed 具体内容，
+        # 因此这里安全地补 3 张同种牌作为占位即可。
+        plain = Tile(tile.tile_id).to_mjai()
         return {
             "type": "kakan", "actor": seat,
             "pai": tile.to_mjai(),
+            "consumed": [plain, plain, plain],
         }
 
     # 九种九牌流局
