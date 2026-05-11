@@ -720,8 +720,8 @@ class MjaiSimulator:
                 cands_set.add(tile.tile_id)
 
         cans.discard_candidates = list(cands_set)
-        # can_riichi: only when exactly tenpai (shanten==0) and not already in riichi
-        if shanten == 0:
+        # can_riichi: tenpai(shanten==0) + 门清（无副露）+ 未立直
+        if shanten == 0 and len(state.melds[seat]) == 0:
             cans.can_riichi = not state.in_riichi[seat]
         if shanten == -1:
             cans.can_tsumo = True
