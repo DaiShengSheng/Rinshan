@@ -12,7 +12,7 @@ riichi_legal_sample_weight: 3.0
 riichi_bc_scale: 0.0
 stage3_anchor_weight: 0.2
 stage3_anchor_temperature: 1.0
-riichi_rank_weight: 0.1
+riichi_rank_weight: 0.0
 riichi_margin: 0.2
 
 data_dir: data/annotated_grp
