@@ -8,11 +8,16 @@ Bug 背景：
   导致 RIICHI_TOKEN(497) 不进入 candidates，_find_action_idx fallback 到 cands[0]（随机 DISCARD）。
   结果：所有立直宣言样本的 action_chosen 指向错误 DISCARD，RIICHI 学习信号为 0。
 
-修复1（立直宣言点）：
-  识别：riichi_declared[0]==True AND discard in cands AND melds[0] 为空（门清）
-  处理：保留原打牌候选 + 追加 RIICHI_TOKEN，action_chosen 指向 RIICHI
+三种输入状态均可处理（幂等）：
+  状态A：原始未 patch   → riichi_declared[0]=True, cands=[打牌...], 无 RIICHI
+  状态B：旧脚本 patch过 → riichi_declared[0]=True, cands=[RIICHI_TOKEN] 单元素（打牌候选丢失）
+  状态C：新脚本 patch过 → riichi_declared[0]=True, cands=[打牌...+RIICHI]（已正确，幂等跳过）
+
+修复1（立直宣言点，处理状态A/B）：
+  状态A：cands 含 DISCARD → 保留原打牌候选 + 追加 RIICHI，action_chosen 指向 RIICHI
+  状态B：cands=[RIICHI_TOKEN] 单元素 → 用 hand 字段重建打牌候选 + 追加 RIICHI
   效果：IQL 能学到「同一局面人类选立直而非 damaten（打牌）」的 Q 对比信号
-  注：副露时不处理（melds[0] 非空，不能立直，修复2负责清残留 RIICHI）
+  注：melds[0] 非空时不处理（副露不能立直，修复2负责清残留 RIICHI）
 
 修复2（副露无法立直）：
   识别：riichi_declared[0]==False AND 497 in candidates AND melds[0] 非空
@@ -34,9 +39,30 @@ RIICHI_TOKEN   = 497
 DISCARD_OFFSET = 37
 DISCARD_END    = 74   # 37..73 inclusive (34 regular + 3 aka)
 
+# 牌名 -> tile_id 映射（赤宝牌映射到对应普通5，与 simulator 打牌候选 token 一致）
+_TILE_TO_ID: dict[str, int] = {}
+for _s, _b in (('m', 0), ('p', 9), ('s', 18)):
+    for _i in range(1, 10):
+        _TILE_TO_ID[f'{_i}{_s}'] = _b + (_i - 1)
+for _i in range(1, 8):
+    _TILE_TO_ID[f'{_i}z'] = 27 + (_i - 1)
+_TILE_TO_ID['0m'] = 4   # 赤5m → 普通5m (tile_id=4)
+_TILE_TO_ID['0p'] = 13  # 赤5p → 普通5p (tile_id=13)
+_TILE_TO_ID['0s'] = 22  # 赤5s → 普通5s (tile_id=22)
+
 
 def _has_discard(cands: list[int]) -> bool:
     return any(DISCARD_OFFSET <= c < DISCARD_END for c in cands)
+
+
+def _discard_cands_from_hand(hand: list[str]) -> list[int]:
+    """用 hand 字段重建合法打牌候选 token 列表（去重，排序）。"""
+    tokens: set[int] = set()
+    for tile in hand:
+        tid = _TILE_TO_ID.get(tile)
+        if tid is not None:
+            tokens.add(tid + DISCARD_OFFSET)
+    return sorted(tokens)
 
 
 def patch_sample(d: dict) -> tuple[dict, bool]:
@@ -47,17 +73,23 @@ def patch_sample(d: dict) -> tuple[dict, bool]:
     player_melds    = melds[0] if melds else []
     action_chosen   = d.get("action_chosen", 0)
 
-    # ── 修复1：立直宣言点 ──────────────────────────────────────────────────
-    # riichi_declared[0]=True（reach 事件已触发）+ candidates 含 DISCARD + melds[0] 为空（门清）
-    # → 这是被 bug 丢掉了 RIICHI 候选的立直宣言决策点
-    # 正确做法：保留原打牌候选（作为对比），追加 RIICHI_TOKEN，action_chosen 指向 RIICHI
-    # 这样 IQL 才能学到「在这个局面人类选了立直而非打牌（damaten）」
-    # 副露情况（melds[0] 非空）：不能立直，不做处理（修复2会清掉残留的 RIICHI）
-    if riichi_declared[0] and _has_discard(cands) and not player_melds:
-        new_cands = [c for c in cands if c != RIICHI_TOKEN]  # 防止重复追加
-        new_cands.append(RIICHI_TOKEN)
-        d["action_candidates"] = new_cands
-        d["action_chosen"]     = len(new_cands) - 1          # 末尾的 RIICHI_TOKEN
+    # ── 修复1：立直宣言点（状态A/B/C 均幂等）─────────────────────────────────
+    # 条件：riichi_declared[0]=True + melds[0] 为空（门清才能立直）
+    #       + 尚未正确 patch（排除状态C：cands 同时含 DISCARD 和 RIICHI 已是正确格式）
+    # 状态A（原始未patch）：cands 含 DISCARD 无 RIICHI  → 直接复用原打牌候选
+    # 状态B（旧脚本patch）：cands=[RIICHI_TOKEN] 单元素 → 用 hand 字段重建打牌候选
+    # 状态C（新脚本patch）：cands=[打牌...+RIICHI]      → is_fully_patched=True，跳过
+    is_fully_patched = (RIICHI_TOKEN in cands) and _has_discard(cands)  # 状态C
+    if riichi_declared[0] and not player_melds and not is_fully_patched:
+        if _has_discard(cands):
+            base_cands = [c for c in cands if c != RIICHI_TOKEN]   # 状态A
+        else:
+            base_cands = _discard_cands_from_hand(d.get("hand", []))  # 状态B
+        if not base_cands:
+            return d, False   # hand 为空或映射失败，保守跳过
+        base_cands.append(RIICHI_TOKEN)
+        d["action_candidates"] = base_cands
+        d["action_chosen"]     = len(base_cands) - 1
         return d, True
 
     # ── 修复2：副露状态不能立直 ────────────────────────────────────────────
