@@ -439,20 +439,32 @@ def main():
             bel_recall = bel_tp / max(bel_total, 1)
             avgs = {k: val_sums[k] / n for k in val_keys}
             val_loss = avgs["total"]
-            riichi_human_rate = riichi_human_count / max(riichi_legal_count, 1)
-            riichi_pred_rate = riichi_pred_count / max(riichi_legal_count, 1)
-            riichi_recall = riichi_match_count / max(riichi_human_count, 1)
-            riichi_precision = riichi_match_count / max(riichi_pred_count, 1)
-            non_riichi_agree = non_riichi_anchor_agree / max(non_riichi_state_count, 1)
+            # riichi_human_rate: given tenpai, how often does human choose riichi
+            # NOTE: only meaningful after data is re-parsed with the fixed simulator
+            #       (old annotated data has 0 riichi_human due to parser bug)
+            riichi_human_rate  = riichi_human_count / max(riichi_legal_count, 1)
+            riichi_pred_rate   = riichi_pred_count  / max(riichi_legal_count, 1)
+            # recall / precision only meaningful when riichi_human_count > 0
+            riichi_recall      = riichi_match_count / max(riichi_human_count, 1)
+            riichi_precision   = riichi_match_count / max(riichi_pred_count, 1)
+            non_riichi_agree   = non_riichi_anchor_agree / max(non_riichi_state_count, 1)
+            riichi_stats = (
+                f"  riichi_legal={riichi_legal_count}"
+                f"  riichi_human_rate={riichi_human_rate:.3f}"
+                f"  riichi_pred_rate={riichi_pred_rate:.3f}"
+            )
+            if riichi_human_count > 0:
+                riichi_stats += (
+                    f"  riichi_recall={riichi_recall:.3f}"
+                    f"  riichi_precision={riichi_precision:.3f}"
+                )
+            else:
+                riichi_stats += "  [recall/precision N/A: no riichi samples in val, re-parse data]"
             logger.info(
                 f"[val step={step}] "
                 + "  ".join(f"{k}={avgs[k]:.4f}" for k in val_keys if avgs[k] != 0.0)
                 + f"  bel_recall={bel_recall:.3f}"
-                + f"  riichi_legal={riichi_legal_count}"
-                + f"  riichi_human_rate={riichi_human_rate:.3f}"
-                + f"  riichi_pred_rate={riichi_pred_rate:.3f}"
-                + f"  riichi_recall={riichi_recall:.3f}"
-                + f"  riichi_precision={riichi_precision:.3f}"
+                + riichi_stats
                 + (f"  nonriichi_anchor_agree={non_riichi_agree:.3f}" if non_riichi_state_count > 0 else "")
             )
             is_best_val = val_loss < best_val_loss

@@ -22,6 +22,7 @@ from rinshan.constants import (
     PROG_DRAW_BASE, PROG_RIICHI_BASE,
     PROG_CHI_BASE, PROG_PON_BASE, PROG_DAIMINKAN_BASE,
     PROG_ANKAN_BASE, PROG_KAKAN_BASE, PROG_NEWDORA_BASE,
+    RIICHI_TOKEN,
 )
 from .state   import GameState, PlayerView, ActionCandidate
 from .action  import (
@@ -224,19 +225,30 @@ class MjaiSimulator:
         # ── 在移除手牌之前 生成标注 ──────────────────
         # 此时手牌 = 摸牌后的完整手牌（包含待打出的 tile）
         anns = []
-        cans  = self._compute_discard_candidates(state, seat)
-        cands = self._build_candidate_tokens(cans, ActionType.DISCARD)
-        if cands:
-            # 判断是否为立直宣言时的打牌
-            if state.riichi_declared[seat] and state.riichi_discard_idx[seat] == len(state.discards[seat]):
-                action = Action(ActionType.RIICHI)
-            else:
-                action = Action(ActionType.DISCARD, tile=tile)
-            
-            chosen = self._find_action_idx(cands, action)
+        is_riichi_discard = (
+            state.riichi_declared[seat]
+            and state.riichi_discard_idx[seat] == len(state.discards[seat])
+        )
+
+        if is_riichi_discard:
+            # ── 立直宣言打牌：强制构建只含 RIICHI 的候选列表 ──────────────────
+            # _compute_discard_candidates / _build_candidate_tokens 依赖向听数：
+            # 若此时手牌恰好 shanten==-1（完成牌型），can_riichi=False 而 can_tsumo=True，
+            # 导致 RIICHI_TOKEN 不进入 cands，_find_action_idx fallback 到错误 token。
+            # 解决方案：立直宣言打牌时直接生成 [RIICHI_TOKEN] 候选，chosen 固定为 0。
+            cands  = [RIICHI_TOKEN]
+            chosen = 0
             view   = state.player_view(seat)
             ann    = self._make_annotation(game_id, seat, view, state, cands, chosen)
             anns.append(ann)
+        else:
+            cans  = self._compute_discard_candidates(state, seat)
+            cands = self._build_candidate_tokens(cans, ActionType.DISCARD)
+            if cands:
+                chosen = self._find_action_idx(cands, Action(ActionType.DISCARD, tile=tile))
+                view   = state.player_view(seat)
+                ann    = self._make_annotation(game_id, seat, view, state, cands, chosen)
+                anns.append(ann)
 
         # ── 更新状态 ──────────────────────────────────
         _remove_tile(state.hands[seat], tile)
