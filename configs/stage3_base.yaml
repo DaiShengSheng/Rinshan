@@ -68,7 +68,7 @@ hand_reward_weight: 1.0
 # 立直专项强化：当前状态合法动作里包含 RIICHI 时，整个样本 loss 放大
 riichi_legal_sample_weight: 3.0
 # 选择 RIICHI 动作时的 BC 缩放：0=完全豁免，1=和普通动作一样
-riichi_bc_scale: 0.5  # 0=豁免会坍塌为「遇RIICHI必宣」，建议>=0.5
+riichi_bc_scale: 0.0
 stage3_anchor_weight: 0.2
 stage3_anchor_temperature: 1.0
 riichi_rank_weight: 0.1

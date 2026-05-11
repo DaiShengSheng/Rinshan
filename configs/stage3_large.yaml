@@ -9,7 +9,7 @@ stage2_ckpt: checkpoints/stage2_large/best.pt
 reinit_riichi_embed: false
 # Stage3: 普通打牌保持稳定，仅对可立直局面提升学习密度
 riichi_legal_sample_weight: 3.0
-riichi_bc_scale: 0.5
+riichi_bc_scale: 0.0
 stage3_anchor_weight: 0.2
 stage3_anchor_temperature: 1.0
 riichi_rank_weight: 0.1
