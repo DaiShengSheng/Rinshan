@@ -48,6 +48,8 @@ import gzip
 import json
 import math
 import sys
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -190,15 +192,27 @@ def build_agents(args):
     return agents
 
 
+def _build_versus_agent_pair_from_models(args, model_ch, model_bl):
+    """基于已加载模型构建一对 versus agent（challenger / baseline）。"""
+    from rinshan.self_play.agent import RinshanAgent
+    from rinshan.self_play.libriichi_agent import LibriichiBoostedAgent, libriichi_available
+
+    AgentCls = LibriichiBoostedAgent if libriichi_available() else RinshanAgent
+    agent_ch = AgentCls(model_ch, name="ch", device=args.device,
+                        temperature=args.temperature, top_p=args.top_p, greedy=args.greedy,
+                        enable_rule_based_agari_guard=True)
+    agent_bl = AgentCls(model_bl, name="bl", device=args.device,
+                        temperature=args.temperature, top_p=args.top_p, greedy=args.greedy,
+                        enable_rule_based_agari_guard=True)
+    return agent_ch, agent_bl
+
+
 def build_versus_agents(args):
     """
     versus 模式：主模型 2 席 vs 对手模型 2 席。
     seats [ch_0, bl_0, ch_1, bl_1]，Arena round_robin 轮换后
     每局始终保持 2 ch + 2 bl，且座位均匀分布。
     """
-    from rinshan.self_play.agent import RinshanAgent
-    from rinshan.self_play.libriichi_agent import LibriichiBoostedAgent, libriichi_available
-
     if not args.ckpt:
         raise ValueError("versus 模式必须指定 --ckpt")
     if not args.ckpt2:
@@ -215,25 +229,9 @@ def build_versus_agents(args):
     print(f"[+] Challenger : {ch_label}")
     print(f"[+] Baseline   : {bl_label}")
 
-    # 两个模型各自加载（共享同一 device，显存允许时没问题）
     model_ch = load_model(args.ckpt,  args.model_preset, args.device)
     model_bl = load_model(args.ckpt2, preset2,            args.device)
-
-    # 构建 2 个 agent 实例（每个模型只实例化一次）：
-    #   agent_ch: 承载 model_ch，逻辑上对应 ch_0 / ch_1 两席
-    #   agent_bl: 承载 model_bl，逻辑上对应 bl_0 / bl_1 两席
-    # Arena 按 id(agent.model) 分组，ch_0/ch_1 同 model 自动合并到同一 batch，
-    # 避免原来 4 实例时 batch size 被无意义切半。
-    # round_robin 下 game_idx=0 → seats=(ch, bl, ch, bl)
-    #              game_idx=1 → seats=(bl, ch, bl, ch)  依次轮换
-    # 每局恰好 2 ch + 2 bl，座次均匀覆盖。
-    AgentCls = LibriichiBoostedAgent if libriichi_available() else RinshanAgent
-    agent_ch = AgentCls(model_ch, name="ch", device=args.device,
-                        temperature=args.temperature, top_p=args.top_p, greedy=args.greedy,
-                        enable_rule_based_agari_guard=True)
-    agent_bl = AgentCls(model_bl, name="bl", device=args.device,
-                        temperature=args.temperature, top_p=args.top_p, greedy=args.greedy,
-                        enable_rule_based_agari_guard=True)
+    agent_ch, agent_bl = _build_versus_agent_pair_from_models(args, model_ch, model_bl)
     agents = [agent_ch, agent_bl, agent_ch, agent_bl]
     return agents
 
@@ -521,7 +519,13 @@ def mjai_events_to_tenhou(events: list[dict]) -> dict[str, Any]:
                 if not results:
                     results.append("和了")
                 results.append(deltas)
-                results.append([who, target])
+                # mjai-reviewer UI 需要 hora_detail 至少带一个文字描述，
+                # 否则虽然能解析 who/target，但役种/点数区域会空白或布局异常。
+                # Rust 自对弈日志的 hora 事件不携带役名，这里补一个占位点数描述。
+                # 点数字符串取本次和了的正向得点（winner delta），例如 "3200点" / "8000点"。
+                win_delta = deltas[who] if 0 <= who < len(deltas) else 0
+                point_desc = f"{win_delta}点"
+                results.append([who, target, point_desc])
 
             elif t_type == "ryukyoku":
                 deltas = list(ev.get("deltas", [0, 0, 0, 0]))
@@ -613,49 +617,58 @@ def _collect_mjson(log_dir: str, output_dir: str, n_games: int, label: str = "ga
 
 
 def evaluate_versus_strength(args, log_dir_override=None) -> dict:
-    """返回对战汇总指标，供 Stage3 arena gate 使用。"""
+    """返回对战汇总指标，供 Stage3 arena gate 使用。默认采用“单 worker 单局”隔离模式。"""
     import time
-    from rinshan.self_play.agent import RinshanAgent
-    from rinshan.self_play.libriichi_agent import LibriichiBoostedAgent, libriichi_available
     from libriichi.arena import TwoVsTwo
 
     n_games = int(args.n_games)
     if n_games % 2 != 0:
         n_games += 1
-    wave = int(args.parallel_games)
-    if wave % 2 != 0:
-        wave += 1
+
+    effective_log_dir = log_dir_override if log_dir_override is not None else args.log_dir
+    n_workers = int(getattr(args, 'parallel_groups', 1) or 1)
+    if n_workers < 1:
+        n_workers = 1
+    n_workers = min(n_workers, n_games)
 
     preset2 = args.ckpt2_preset or args.model_preset
     model_ch = load_model(args.ckpt, args.model_preset, args.device)
     model_bl = load_model(args.ckpt2, preset2, args.device)
-    AgentCls = LibriichiBoostedAgent if libriichi_available() else RinshanAgent
-    agent_ch = AgentCls(model_ch, name="ch", device=args.device,
-                        temperature=args.temperature, top_p=args.top_p, greedy=args.greedy,
-                        enable_rule_based_agari_guard=True)
-    agent_bl = AgentCls(model_bl, name="bl", device=args.device,
-                        temperature=args.temperature, top_p=args.top_p, greedy=args.greedy,
-                        enable_rule_based_agari_guard=True)
 
-    effective_log_dir = log_dir_override if log_dir_override is not None else args.log_dir
-    arena = TwoVsTwo(
-        disable_progress_bar=args.quiet,
-        log_dir=effective_log_dir,
-        parallel_groups=int(getattr(args, 'parallel_groups', 1) or 1),
+    _LIBRIICHI_HAND_ERRS = (
+        "is not in hand", "cannot tsumogiri", "not a hora hand",
+        "capacity overflow", "fuuro overflow", "invalid action",
+        "assertion", "failed"
     )
-    all_results = []
-    generated = 0
-    skipped = 0
-    t0 = time.time()
-    _LIBRIICHI_HAND_ERRS = ("is not in hand", "cannot tsumogiri", "not a hora hand",
-                             "capacity overflow", "fuuro overflow", "invalid action",
-                             "assertion", "failed")
-    while generated < n_games:
-        this_wave = min(wave, n_games - generated)
+
+    worker_log_root = Path(effective_log_dir) if effective_log_dir else None
+    if worker_log_root is not None:
+        worker_log_root.mkdir(parents=True, exist_ok=True)
+    worker_local = threading.local()
+
+    def _run_single_game(seed_i: int, worker_idx: int):
+        # 每个 worker（线程）持有自己独立的一套 agent / arena，且一次只跑 1 局。
+        # 这样 worker 内永远不存在多局并发推进，避免状态串局。
+        bundle = getattr(worker_local, "bundle", None)
+        if bundle is None:
+            agent_ch, agent_bl = _build_versus_agent_pair_from_models(args, model_ch, model_bl)
+            worker_log_dir = None
+            if worker_log_root is not None:
+                worker_log_dir = str(worker_log_root / f"worker_{worker_idx:02d}")
+                Path(worker_log_dir).mkdir(parents=True, exist_ok=True)
+            arena = TwoVsTwo(
+                disable_progress_bar=True,
+                log_dir=worker_log_dir,
+                parallel_groups=1,
+            )
+            bundle = {"agent_ch": agent_ch, "agent_bl": agent_bl, "arena": arena}
+            worker_local.bundle = bundle
+        arena = bundle["arena"]
+        agent_ch = bundle["agent_ch"]
+        agent_bl = bundle["agent_bl"]
         try:
-            results = arena.py_vs_py(agent_ch, agent_bl, (args.seed + generated, 0), this_wave // 2)
-            all_results.extend(results)
-            generated += this_wave
+            results = arena.py_vs_py(agent_ch, agent_bl, (seed_i, 0), 1)
+            return {"ok": True, "results": list(results), "seed": seed_i}
         except BaseException as e:
             if type(e).__name__ in ('KeyboardInterrupt', 'SystemExit'):
                 raise
@@ -663,15 +676,30 @@ def evaluate_versus_strength(args, log_dir_override=None) -> dict:
             if 'PanicException' in type(e).__name__ or 'PanicException' in type(e).__mro__.__str__():
                 emsg = type(e).__name__ + ': ' + emsg
             if any(tag in emsg for tag in _LIBRIICHI_HAND_ERRS):
-                skipped += 1
-                generated += 1
-                if not args.quiet:
-                    print(f"\n[warn] libriichi bug @ seed={args.seed + generated - 1}"
-                          f" msg={emsg!r}\uff0c\u5df2\u8df3\u8fc7\uff08\u5171\u8df3\u8fc7 {skipped} \u5c40\uff09", flush=True)
-            else:
-                raise
-        except KeyboardInterrupt:
+                return {"ok": False, "seed": seed_i, "error": emsg}
             raise
+
+    all_results = []
+    skipped = 0
+    t0 = time.time()
+    with ThreadPoolExecutor(max_workers=n_workers) as pool:
+        futures = []
+        for game_idx in range(n_games):
+            seed_i = args.seed + game_idx
+            worker_idx = game_idx % n_workers
+            futures.append(pool.submit(_run_single_game, seed_i, worker_idx))
+        for fut in as_completed(futures):
+            item = fut.result()
+            if item.get("ok"):
+                all_results.extend(item["results"])
+            else:
+                skipped += 1
+                if not args.quiet:
+                    print(
+                        f"\n[warn] libriichi bug @ seed={item['seed']}"
+                        f" msg={item['error']!r}，已跳过（共跳过 {skipped} 局）",
+                        flush=True,
+                    )
 
     elapsed = time.time() - t0
     ch_ranks, bl_ranks = [], []
@@ -721,8 +749,8 @@ def evaluate_versus_strength(args, log_dir_override=None) -> dict:
         "baseline_avg_score": bl_score,
         "delta_rank": delta,
         "challenger_rank_se": se,
+        "skipped": skipped,
     }, all_results
-
 
 def run_rust_versus(args) -> None:
     """Rust TwoVsTwo 双模型对战（wave 循环，支持 --parallel_games）"""
